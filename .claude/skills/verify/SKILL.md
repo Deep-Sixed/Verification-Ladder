@@ -104,7 +104,13 @@ a reachability result.
 
 - Shell loops that build TOML with `printf "$var\n"` mangle it, and the run then
   takes a path you did not intend. Write policy files with a quoted heredoc.
-- A pipeline's `$?` is the last stage's, not `verify.py`'s. Measure the exit code
-  on its own line.
+- **When verifying an exit code, capture the subject command's status
+  immediately.** Never infer it from a surrounding pipeline, shell wrapper
+  (`bash -c`), loop body, command group, cleanup sequence, or any later command:
+  `$?` reports whatever executed last, which in all of those is something other
+  than the thing being measured. Run the subject on its own line and read `$?` on
+  the next one. Three verification passes have produced three measurement errors
+  and this was one of them, through a `bash -c` wrapper whose final statement was
+  a `cp` restoring a file.
 - `compose` needs every record to agree on one state. Two state ids for one
   unchanged commit almost always means an untracked file appeared mid-workflow.
