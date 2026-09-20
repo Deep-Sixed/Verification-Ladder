@@ -716,8 +716,9 @@ def definition_status(claimed: dict, governing: dict) -> tuple[str, str | None]:
     current = governing[name]
     if claimed.get("definition_sha256") != current["definition_sha256"]:
         return INADMISSIBLE, (f"{name!r} was established under definition "
-                              f"{str(claimed.get('definition_sha256'))[:19]}…, the policy now declares "
-                              f"{current['definition_sha256'][:19]}…; re-verify under the definition in force")
+                              f"{str(claimed.get('definition_sha256'))[:19]}…; the definition governing "
+                              f"this task is {current['definition_sha256'][:19]}…. Re-verify under the "
+                              f"one in force, or this is a definition change (§L2)")
     return ADMISSIBLE, None
 
 
@@ -1156,6 +1157,74 @@ def pair_shadow(record_path: Path, authoritative: dict) -> tuple[dict | None, st
     return shadow, None
 
 
+def baseline_path_for(record: Path) -> Path:
+    """Where a task's baseline sits relative to an evidence record.
+
+    Beside the shadow records, and never in the evidence directory itself: a
+    baseline swept into `compose .verification/*.json` would be read as evidence
+    about a state it deliberately does not describe.
+    """
+    return record.parent / SHADOW_DIR / "baseline.v3.json"
+
+
+def load_baseline(path: Path) -> dict:
+    record = load_json(path)
+    if record.get("schema") != BASELINE_SCHEMA:
+        raise blocked(f"{path}: not a {BASELINE_SCHEMA} record")
+    if record.get("origin") not in ("captured", "reconstructed"):
+        raise blocked(f"{path}: baseline carries no origin; a reconstructed baseline must say so")
+    return record
+
+
+def baseline_applies(repo: Path, baseline: dict) -> tuple[bool, str | None]:
+    """Whether this baseline describes a state the one under review descends from.
+
+    A baseline binds to the state before the change, so it can never match the
+    state under review - that is §F rather than a defect. What it must be is on
+    this line of development: a baseline captured at a commit that is not an
+    ancestor of HEAD was captured for another task, and the definitions it holds
+    never governed this one.
+    """
+    head = ((baseline.get("target_state") or {}).get("repository") or {}).get("head")
+    if not head:
+        return False, "the baseline carries no commit, so there is nothing to place it against"
+    try:
+        git(repo, "merge-base", "--is-ancestor", head, "HEAD")
+    except subprocess.CalledProcessError:
+        return False, (f"the baseline was captured at {head[:12]}, which is not an ancestor of this "
+                       f"HEAD; it governed another task")
+    return True, None
+
+
+def governance_rows(repo: Path, record_path: Path, candidate: dict,
+                    rows: list[dict]) -> tuple[dict | None, list[dict]]:
+    """Whether every gate still means what it meant when this task started.
+
+    A missing baseline is not an error. Nothing about the authoritative result
+    depends on one, and `compose` never reads it; this reports N/A and carries on,
+    exactly as it did before a baseline surface existed. Whether a baseline
+    becomes a prerequisite is M4's decision, not something M3 arrives at by
+    making its absence inconvenient.
+    """
+    path = baseline_path_for(record_path)
+    if not path.exists():
+        return None, [_row("-", "governance", NOT_APPLICABLE, None, None,
+                           "no baseline record for this task, so there is no governing definition "
+                           "captured before the change to compare against")]
+    try:
+        baseline = load_baseline(path)
+    except SystemExit:
+        return None, [_row("-", "governance", NOT_COMPARABLE, None, None,
+                           f"{path.name} is not a readable {BASELINE_SCHEMA} record")]
+    applies, why = baseline_applies(repo, baseline)
+    if not applies:
+        return None, [_row("-", "governance", NOT_COMPARABLE, None, baseline.get("origin"), why)]
+    state, findings = governance_status(baseline, candidate, rows)
+    label = "governance" if state == DEFINITION_UNCHANGED else "governance (DEFINITION CHANGE PENDING)"
+    return baseline, [_row("-", label, AGREE, baseline.get("origin"), state,
+                           "; ".join(findings) or "every gate means what it meant at baseline")]
+
+
 def _row(gate: str, predicate: str, outcome: str, observed=None, derived=None, why: str = "") -> dict:
     return {"gate": gate, "predicate": predicate, "outcome": outcome,
             "v2_observed": observed, "v3_derived": derived, "why": why}
@@ -1319,9 +1388,13 @@ def compare_records(repo: Path, record_path: Path, authoritative: dict, declared
     rows.append(_row("-", "verifier contract", AGREE if status == ADMISSIBLE else DISAGREE,
                      COMPATIBILITY, (shadow.get("verifier") or {}).get("compatibility"),
                      why or "records compose only under one set of admissibility rules"))
-    rows.append(_row("-", "governance", NOT_APPLICABLE, None, None,
-                     "no baseline record exists for this task, so there is no governing "
-                     "definition captured before the change to compare against"))
+    baseline, governance = governance_rows(repo, record_path, governing, shadow["gates"])
+    rows.extend(governance)
+    if baseline is not None:
+        # The definitions in force are the ones captured before the change, not
+        # the working tree's - §L1. A policy read from the tree at this point is
+        # one the task could have edited, and it would not even need committing.
+        governing = governing_definitions(baseline)
     if shadow.get("source"):
         rows.extend(compare_ci_source(shadow, authoritative, declared, governing, derived_by_name))
 
@@ -1352,8 +1425,12 @@ def compare_ci_source(shadow: dict, authoritative: dict, declared: dict, governi
     summary was copied correctly.
     """
     source = shadow["source"]
-    expected = {"head_sha": authoritative["repository"]["head"], "repository": source.get("repository"),
-                "workflow": source.get("workflow"), "job": source.get("job"),
+    # Declared, never taken from the payload under examination. Reading the
+    # expected workflow out of the run that claims to be it makes the check
+    # compare a value with itself, which passes for any payload at all.
+    expect = (declared.get(SHADOW_POLICY) or {}).get("ci") or {}
+    expected = {"head_sha": authoritative["repository"]["head"], "repository": expect.get("repository"),
+                "workflow": expect.get("workflow"), "job": expect.get("job"),
                 "events": declared.get("ci_head_events") or ["push"]}
     run = {"id": source.get("run_id"), "head_sha": source.get("head_sha"), "event": source.get("event"),
            "run_attempt": source.get("run_attempt"), "path": source.get("workflow"),
@@ -1376,10 +1453,46 @@ def compare_ci_source(shadow: dict, authoritative: dict, declared: dict, governi
             continue
         status, why = ci_step_status(job, step)
         executed_status = next((g["status"] for g in authoritative["gates"] if g["name"] == name), None)
-        rows.append(_row(name, "ci step", AGREE if status == executed_status else DISAGREE,
-                         executed_status, status,
-                         why or f"step {step!r} concluded what the authoritative record says it did"))
+        agreed = status == executed_status
+        rows.append(_row(name, "ci step", AGREE if agreed else DISAGREE, executed_status, status,
+                         (why if agreed else
+                          f"the raw conclusions in this record do not yield the status it reports for "
+                          f"step {step!r}")
+                         or f"step {step!r} concluded what the authoritative record says it did"))
     return rows
+
+
+def command_baseline(args) -> int:
+    """Capture the definitions that govern this task, before the task changes them.
+
+    §F and §L1. The record is non-authoritative like everything else in §M:
+    `compose` never reads it, no verdict depends on it, and its absence is not an
+    error. It is written into the shadow directory so the documented
+    `compose .verification/*.json` cannot reach it.
+
+    Nothing runs. A baseline captures what the gates mean, not what they say.
+    """
+    repo = require_repository(Path(args.repo).resolve())
+    declared = policy(repo)
+    output = Path(args.output).resolve() if args.output else baseline_path_for(
+        repo / EVIDENCE_DIR / "record.json")
+    exclude = relative_inside(repo, [output])
+    if args.origin == "reconstructed" and is_dirty(repo, exclude):
+        # §L5: a reconstructed baseline is reconstructible because every input is
+        # reproducible from a commit. From a dirty tree it is not reconstructible
+        # by anyone, which makes the claim unfalsifiable rather than true.
+        raise blocked("a reconstructed baseline must come from a committed state; this tree is dirty")
+    view = shadow_declaration(declared)
+    record = baseline_record(repo, view, [], origin=args.origin, exclude=exclude)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(record, indent=2) + "\n")
+    governing = record["governing"]["gates"]
+    print(f"BASELINE ({record['origin']}, evidence/3, no authority)", file=sys.stderr)
+    print(f"  state    {record['target_state']['repository']['worktree_state']}", file=sys.stderr)
+    for name in sorted(governing):
+        print(f"  governs  {name}  {governing[name]['definition_sha256'][:19]}…", file=sys.stderr)
+    print(f"  baseline {output}", file=sys.stderr)
+    return 0
 
 
 def command_compare(args) -> int:
@@ -1711,7 +1824,13 @@ def command_import_ci(args) -> int:
         source={"repository": (run.get("repository") or {}).get("full_name"),
                 "run_id": run.get("id"), "run_attempt": run.get("run_attempt"),
                 "workflow": run.get("path"), "job": job.get("name"),
-                "job_run_id": job.get("run_id"), "event": event, "head_sha": sha}))
+                "job_run_id": job.get("run_id"), "event": event, "head_sha": sha,
+                # The conclusions as given, not the statuses v2 derived from
+                # them. Reading back a summary of an answer only establishes
+                # that the summary was copied correctly; `ci_step_status` has to
+                # meet the same payload v2 met.
+                "steps": [{"name": step.get("name"), "conclusion": step.get("conclusion")}
+                          for step in job.get("steps") or []]}))
     return EXIT[record["verdict"]]
 
 
@@ -1903,6 +2022,13 @@ def main(argv: list[str] | None = None) -> int:
     composer.add_argument("paths", nargs="+", help="evidence records to compose")
     composer.add_argument("--output", help="write the composite here")
     composer.set_defaults(handler=command_compose)
+
+    capturer = sub.add_parser(
+        "baseline", help="capture the gate definitions governing this task (evidence/3, no authority)")
+    capturer.add_argument("--origin", choices=("captured", "reconstructed"), default="captured",
+                          help="'reconstructed' marks a baseline rebuilt from an immutable commit")
+    capturer.add_argument("--output", help="write the baseline here instead of .verification/shadow/")
+    capturer.set_defaults(handler=command_baseline)
 
     comparer = sub.add_parser(
         "compare", help="diagnostic: how the evidence/3 reading of an execution differs from it")

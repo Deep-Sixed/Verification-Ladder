@@ -86,3 +86,12 @@ tests = "Run python -m pytest -q"
 # spec_root = "docs/journeys"
 # spec_files = ["docs/journeys/login.md"]
 # artifacts = [".verification/artifacts/login-journey.json"]
+
+# What a CI record must have come from, for the evidence/3 provenance chain.
+# Declared here rather than read out of the payload under examination: checking
+# a run's workflow against the workflow that same run claims compares a value
+# with itself, which passes for any payload at all.
+# [shadow.ci]
+# repository = "acme/widget"
+# workflow = ".github/workflows/ci.yml"
+# job = "validate"

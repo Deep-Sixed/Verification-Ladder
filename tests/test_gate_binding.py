@@ -78,7 +78,8 @@ def test_definition_drift_is_inadmissible_rather_than_failing(governing, tmp_pat
     now = verify.gate_definitions(tmp_path, weakened)
     status, reason = verify.definition_status(_row("lint", "local", governing), now)
     assert status == verify.INADMISSIBLE
-    assert "re-verify under the definition in force" in reason
+    assert "the definition governing this task is" in reason
+    assert "Re-verify under the" in reason
 
 
 def test_an_unrelated_gate_survives_a_definition_change_elsewhere(governing, tmp_path):
