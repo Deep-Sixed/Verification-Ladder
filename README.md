@@ -96,4 +96,10 @@ real project ([Cerberus](https://github.com/Deep-Sixed/Cerberus)), which is now 
 consumer of this repository rather than the owner of the skill. This repository
 verifies itself with its own ladder on every change.
 
+The evidence model is being revised. [`docs/design/evidence-v3.md`](docs/design/evidence-v3.md) is a design note
+fixing the shape of `verification.ladder.evidence/3`, under which a result is
+admissible only when its definition, permitted authority, execution provenance,
+target state, proof artifacts and verifier identity all refer to the same thing.
+It is a design note only; none of it is implemented yet.
+
 MIT licensed; see `LICENSE`.
