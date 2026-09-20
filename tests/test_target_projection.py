@@ -8,6 +8,7 @@ never on fewer, and never on more.
 """
 
 import importlib.util
+import os
 import subprocess
 from pathlib import Path
 
@@ -19,12 +20,20 @@ verify = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(verify)
 
 
+# Both checkouts must reach the SAME commit for the collision to be about the
+# index rather than about two commits made a second apart: `state_id` folds HEAD
+# in, so unpinned dates give the two repositories different SHAs and the premise
+# holds or fails on the clock. CI caught exactly that.
+COMMIT_ENV = {"GIT_AUTHOR_DATE": "2026-01-01T00:00:00+0000",
+              "GIT_COMMITTER_DATE": "2026-01-01T00:00:00+0000"}
+
+
 def _repo(path: Path, staged: str, worktree: str) -> Path:
     subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
     (path / "f.py").write_text("base\n")
     subprocess.run(["git", "add", "-A"], cwd=path, check=True)
     subprocess.run(["git", "-c", "user.email=a@b.invalid", "-c", "user.name=a", "commit", "-qm", "base"],
-                   cwd=path, check=True)
+                   cwd=path, check=True, env={**os.environ, **COMMIT_ENV})
     (path / "f.py").write_text(staged)
     subprocess.run(["git", "add", "f.py"], cwd=path, check=True)
     (path / "f.py").write_text(worktree)
@@ -35,6 +44,8 @@ def test_the_index_is_part_of_the_state(tmp_path):
     """Same HEAD, same worktree bytes, same status codes - different staged content."""
     left = _repo(tmp_path / "left", staged="STAGED_B\n", worktree="WORKTREE_C\n")
     right = _repo(tmp_path / "right", staged="STAGED_D_different\n", worktree="WORKTREE_C\n")
+    assert left.name != right.name and verify.head_sha(left) == verify.head_sha(right), (
+        "the two checkouts must be at one commit, or the digests differ for a reason that is not the index")
     assert verify.state_id(left) == verify.state_id(right), "the worktree digest collides here; that is the premise"
     assert verify.index_state(left) != verify.index_state(right), (
         "two trees whose `git diff --cached` differs must not share a repository identity")
