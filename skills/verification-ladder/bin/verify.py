@@ -37,6 +37,25 @@ from pathlib import Path
 
 SCHEMA = "verification.ladder.evidence/2"
 COMPOSITE = "verification.ladder.composite/1"
+# The schema the model below describes. Nothing emits it yet: this is the data
+# model, its parsing and its validation, landed ahead of the rules that will use
+# it so the enforcement work is written against a settled shape. Records on disk
+# are still evidence/2 until those rules land, because a record stamped v3 while
+# the composer applies v2 semantics would be worse than either.
+SCHEMA_V3 = "verification.ladder.evidence/3"
+BASELINE_SCHEMA = "verification.ladder.baseline/1"
+# Provenance says which build produced a record; the contract says which records
+# may compose. They are separate: a verifier can keep the v3 record shape and
+# change what admissible means, and that must invalidate earlier evidence.
+COMPATIBILITY = "evidence-v3.1"
+VERSION = "0.1.0"  # tracks pyproject's version; tests/test_schema_v3.py holds them equal
+# A gate declares the target dimensions it depends on. Evidence must carry every
+# dimension its gate declares, and dimensions it does not declare are never
+# compared - so a moved runtime expires a behavioural gate while a lint gate,
+# which cannot depend on one, correctly survives.
+TARGET_DIMENSIONS = ("repository", "runtime")
+GATE_CLASSES = {"local": "local", "ci": "ci", "behavioral": "local"}
+EVIDENCE_MODES = ("execution", "execution+attestation")
 # Where a repository declares what "verified" means for it. The first file that
 # carries a policy wins; pyproject.toml lets a Python project keep one config file.
 POLICY_FILES = (("verification.toml", ()), ("pyproject.toml", ("tool", "verification")))
@@ -230,6 +249,202 @@ def local_gates(declared: dict) -> list[tuple[str, str]]:
     if not gates:
         raise blocked("policy declares no [gates.local]; nothing can be executed here")
     return list(gates.items())
+
+
+# --- verification.ladder.evidence/3 model -------------------------------------
+#
+# Parsing, validation and identity for the v3 schema. Nothing here changes what
+# run/attest/import-ci/compose emit or enforce; those follow in the rules series.
+
+
+def canonical(value) -> bytes:
+    """The one byte string a digest may be taken over: UTF-8, sorted keys, no slack.
+
+    Two readers must agree on a definition digest or gate identity means nothing,
+    so the encoding is pinned rather than left to json.dumps' defaults.
+    """
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def digest_of(value) -> str:
+    return "sha256:" + hashlib.sha256(canonical(value)).hexdigest()
+
+
+def verifier_identity() -> dict:
+    """Which build produced a record, and which records it may compose with.
+
+    `commit` and `implementation_sha256` are provenance and never decide
+    composability; `compatibility` is the contract that does.
+    """
+    source = Path(__file__).resolve()
+    identity = {
+        "schema": SCHEMA_V3,
+        "version": VERSION,
+        "compatibility": COMPATIBILITY,
+        "implementation_sha256": "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest(),
+    }
+    try:
+        identity["commit"] = git(source.parent, "rev-parse", "HEAD").decode().strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, NotADirectoryError):
+        # An installation copied rather than cloned has no commit to report. Say
+        # nothing rather than guessing; the implementation digest still pins it.
+        identity["commit"] = None
+    return identity
+
+
+def _declaration_error(name: str, detail: str) -> "SystemExit":
+    return blocked(f"policy gate {name!r}: {detail}")
+
+
+def _normalize_one(name: str, authority: str, declared, key: str) -> dict:
+    """One gate declaration, in either the v3 table form or the legacy string form.
+
+    The legacy form carries no target and no mode, so it normalizes to the only
+    thing a v2 gate could ever have meant: an execution over the repository. The
+    mapping is fixed rather than inferred, so two readers of one legacy file agree.
+    """
+    if isinstance(declared, str):
+        if not declared:
+            raise _declaration_error(name, f"empty {key} for authority {authority!r}")
+        return {"target": ["repository"], "evidence_mode": "execution", key: declared}
+    if not isinstance(declared, dict):
+        raise _declaration_error(name, f"declaration must be a table or a string, got {type(declared).__name__}")
+    if key not in declared:
+        if declared and all(isinstance(v, dict) for v in declared.values()):
+            raise _declaration_error(
+                name,
+                f"no {key!r} and every entry is a table - a gate name containing '.' splits into "
+                f"TOML tables. Quote the key or rename the gate.",
+            )
+        raise _declaration_error(name, f"declaration for authority {authority!r} has no {key!r}")
+    entry = {key: declared[key]}
+    if not isinstance(entry[key], str) or not entry[key]:
+        raise _declaration_error(name, f"{key!r} must be a non-empty string")
+    target = declared.get("target", ["repository"])
+    if not isinstance(target, list) or not target or any(d not in TARGET_DIMENSIONS for d in target):
+        raise _declaration_error(name, f"target must be a non-empty list drawn from {list(TARGET_DIMENSIONS)}")
+    entry["target"] = sorted(set(target))
+    mode = declared.get("evidence_mode", "execution")
+    if mode not in EVIDENCE_MODES:
+        raise _declaration_error(name, f"evidence_mode must be one of {list(EVIDENCE_MODES)}, got {mode!r}")
+    entry["evidence_mode"] = mode
+    for optional in ("spec_root", "spec_files", "artifacts"):
+        if optional in declared:
+            entry[optional] = declared[optional]
+    return entry
+
+
+def normalize_policy(declared: dict) -> dict[str, dict]:
+    """Every gate the policy declares, in one shape, whatever form it was written in.
+
+    A gate may be establishable by more than one authority - this repository's own
+    `lint` is both a local command and a CI step - so authorities are collected
+    under the gate rather than splitting it into two gates. Target and evidence
+    mode belong to the gate itself and must agree across its authorities.
+    """
+    gates: dict[str, dict] = {}
+    sources = [("local", (declared.get("gates") or {}).get("local") or {}, "command"),
+               ("ci", (declared.get("gates") or {}).get("ci") or {}, "step"),
+               ("local", (declared.get("gates") or {}).get("behavioral") or {}, "driver"),
+               ("ci", declared.get("ci_steps") or {}, "step")]
+    for authority, table, key in sources:
+        if not isinstance(table, dict):
+            raise blocked(f"policy: gate table for authority {authority!r} is not a table")
+        for name, body in table.items():
+            entry = _normalize_one(name, authority, body, key)
+            gate = gates.setdefault(name, {"target": entry["target"],
+                                           "evidence_mode": entry["evidence_mode"],
+                                           "authorities": {}})
+            for field in ("target", "evidence_mode"):
+                if gate[field] != entry[field]:
+                    raise _declaration_error(
+                        name, f"{field} differs between its authorities ({gate[field]!r} and {entry[field]!r}); "
+                              f"it belongs to the gate, not to one way of establishing it")
+            for optional in ("spec_root", "spec_files", "artifacts"):
+                if optional in entry:
+                    gate[optional] = entry[optional]
+            if authority in gate["authorities"]:
+                raise _declaration_error(name, f"declared twice for authority {authority!r}")
+            gate["authorities"][authority] = {k: v for k, v in entry.items()
+                                              if k not in ("target", "evidence_mode")}
+    return gates
+
+
+def spec_sources(repo: Path, name: str, gate: dict) -> list[dict]:
+    """The declared specification files that give a behavioural gate its meaning.
+
+    Declared, never observed: an agent reading Markdown cannot be reliably watched,
+    so what a driver happened to open is not part of identity. Every file must
+    resolve beneath the declared root, or a gate could reach outside the
+    specification it claims to be bound by.
+    """
+    files = gate.get("spec_files") or []
+    if not files:
+        return []
+    root_name = gate.get("spec_root")
+    if not isinstance(root_name, str) or not root_name:
+        raise _declaration_error(name, "declares spec_files without a spec_root to bound them")
+    root = (repo / root_name).resolve()
+    sources = []
+    for entry in sorted(files):
+        if not isinstance(entry, str):
+            raise _declaration_error(name, "every spec_files entry must be a path string")
+        resolved = (repo / entry).resolve()
+        if not resolved.is_relative_to(root):
+            raise _declaration_error(name, f"specification {entry!r} resolves outside spec_root {root_name!r}")
+        try:
+            body = resolved.read_bytes()
+        except OSError:
+            raise _declaration_error(name, f"declared specification {entry!r} is unreadable") from None
+        sources.append({"path": entry, "sha256": "sha256:" + hashlib.sha256(body).hexdigest()})
+    return sources
+
+
+def gate_definition(repo: Path, name: str, gate: dict) -> dict:
+    """A gate's identity: its own declaration and its declared specification bytes.
+
+    Taken over the gate's subtree rather than the whole policy file. A shared
+    verification.toml contributes to every gate if hashed wholesale, and editing
+    one gate's command would then invalidate all of them - which would defeat the
+    rule that an unrelated gate survives a definition change elsewhere.
+    """
+    sources = spec_sources(repo, name, gate)
+    declaration = {k: v for k, v in gate.items() if k != "spec_files"}
+    return {"gate": name,
+            "target": gate["target"],
+            "evidence_mode": gate["evidence_mode"],
+            "permitted_authorities": sorted(gate["authorities"]),
+            "sources": sources,
+            "definition_sha256": digest_of({"declaration": declaration, "sources": sources})}
+
+
+def gate_definitions(repo: Path, declared: dict) -> dict[str, dict]:
+    gates = normalize_policy(declared)
+    return {name: gate_definition(repo, name, gate) for name, gate in gates.items()}
+
+
+def baseline_record(repo: Path, declared: dict, gates: list[dict], *, origin: str = "captured",
+                    exclude: frozenset[str] = frozenset()) -> dict:
+    """The pre-mutation state, and the definitions that governed it.
+
+    Baseline binds to the state before the change, so it can never match the state
+    under review and is not an ordinary composable row. `origin` stays in the
+    record: a baseline reconstructed from an immutable commit during migration must
+    never read as one that was captured.
+    """
+    if origin not in ("captured", "reconstructed"):
+        raise blocked(f"baseline origin must be 'captured' or 'reconstructed', got {origin!r}")
+    return {
+        "schema": BASELINE_SCHEMA,
+        "recorded_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "origin": origin,
+        "verifier": verifier_identity(),
+        "target_state": {"repository": {"head": head_sha(repo),
+                                        "worktree_state": state_id(repo, exclude)}},
+        "governing": {"policy_sha256": digest_of(declared),
+                      "gates": gate_definitions(repo, declared)},
+        "gates": gates,
+    }
 
 
 def load_json(path: Path) -> dict:
