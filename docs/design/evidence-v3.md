@@ -560,6 +560,14 @@ declare a behavioural gate**, because v2 has no syntax for one. Behavioural
 gates require v3 policy. Legacy parsing is a migration affordance for existing
 mechanical gates, not a second supported dialect.
 
+**Refined by §M2a.** "Behavioural gates require v3 policy" turned out to mean
+"behavioural gates cannot be exercised until v3 policy is authoritative", which
+would have deferred their first real exercise to the authority switch. The
+resolution is a third position between the two above: v3 policy is accepted in
+a **shadow-only layer** that describes how an authoritative v2 execution reads
+under evidence/3, and creates no authority of its own. Authoritative policy
+remains v2 until M4.
+
 The alternative — a documented one-time migration with no legacy parsing — is
 acceptable, provided it does not pretend the new policy governed its own
 introduction.
@@ -578,6 +586,8 @@ that code runs in the product — against records produced by a path that has
 never produced one — with the composer's verdict already resting on it.
 
 **Decision.** Activation is four stages, and the last is its own review point.
+A fifth section, §M2a, records a prerequisite that M2 forced into the open: the
+policy layer the later stages need, accepted without authority.
 
 ### M1. Shadow emission
 
@@ -598,19 +608,206 @@ v3 implementation, reported where someone will read it, and it fails the
 activation criteria rather than the task in hand. The point of shadow mode is to
 find those disagreements while they are still free.
 
+### M2a. Shadow-only policy acceptance
+
+M2 surfaced a circularity in this staging. The comparison could read no
+behavioural gate, because a behavioural gate needs `[gates.behavioral.<name>]`
+policy syntax, and the authoritative parser refuses that syntax for a good
+reason: read as v2 it misdiagnoses (§L6). So `behavioural_status` and the
+runtime half of `target_projection` — two of the predicates carrying the most
+novel enforcement semantics in the model — were unreachable through the CLI,
+and the artifact chain read `N/A` for every gate that could exist.
+
+Deferring them to M4 would make the authority switch the first end-to-end
+exercise of that feature, which is the exact condition shadow mode was
+introduced to prevent. So the circularity is cut here rather than carried.
+
+**Decision.** A repository may declare evidence/3 gates in a **shadow-only
+policy layer**, under `[shadow]`. Those declarations are read by the shadow
+path and by nothing else. This is not policy activation.
+
+#### The authority boundary
+
+A shadow declaration must not, by itself:
+
+- execute a command;
+- create an authoritative gate;
+- satisfy an authoritative requirement;
+- alter a v2 record, `compose`, the v2 verdict, the v2 exit code, or
+  `READY FOR HUMAN GATE`.
+
+The authoritative execution still comes from a v2-governed gate. What a shadow
+declaration may do is say how **that same execution** is to be read under
+evidence/3 — that `verify-login`, which `[gates.local]` actually executes, is a
+behavioural gate producing artifacts that a judgment must bind to.
+
+A shadow gate with no authoritative execution behind it does not thereby become
+executable. It stays unpaired, and the comparison reports it as not comparable.
+
+#### Parser separation
+
+The boundary is structural rather than a flag. `[shadow]` is a separate subtree
+with its own loading and normalization path; the authoritative parser never
+reads it, and the refusal of v3 syntax in the authoritative `[gates.*]`
+namespace stands exactly as before. Neither reader is weakened to accommodate
+the other, because two parsers whose meanings are hard to tell apart is how a
+shadow layer stops being one.
+
+A shadow declaration **replaces** a gate's authoritative declarations in the
+shadow view rather than merging into them. Merging would give a behavioural
+gate two `local` declarations — a command and a driver — to be reconciled by
+inference. Replacement keeps one answer to "what does this gate mean under
+evidence/3", and keeps authority declared: a shadow gate has `ci` authority
+only where `[shadow.gates.ci.<name>]` says so, never because it is behavioural.
+
+A malformed shadow policy produces a **shadow diagnostic**. It does not block
+the run, and it does not acquire authority by being unreadable — a layer that
+could halt the task by being wrong would already be authoritative.
+
+#### The runtime dimension, without executing anything
+
+A behavioural gate declares `target = ["repository", "runtime"]`, and the
+runtime dimension needs facts to bind to. A shadow probe that ran a command to
+collect them would be a shadow declaration causing execution, which the
+boundary forbids. So the runtime manifest is **read, never produced**:
+`[shadow.runtime] facts_file` names a JSON file, and the four cases fall out of
+whether that file is there and what it says.
+
+| at record time | at comparison time | reading |
+| --- | --- | --- |
+| readable | same content | `ADMISSIBLE` |
+| readable | different content | `STALE` — the runtime moved |
+| readable | absent or unreadable | `BLOCKED` — no target to compare against |
+| absent | any | `INADMISSIBLE` — evidence omits a declared dimension |
+
+The third row is the distinction §D exists for, and it must not collapse into
+the second: an uninterrogable runtime is absence of evidence, not a mismatch.
+
 ### M3. Qualification
 
-Shadow output qualifies activation only when all of it holds:
+**M3 is not "the tests are green."** It is evidence that everything intended to
+become authoritative at M4 has already run through a real, non-authoritative
+surface, under ordinary and adversarial conditions.
+
+That sets the rule for the next boundary: **M4 may switch authority only over
+semantics M3 has already exercised through a non-authoritative real surface.
+Anything first exercised at M4 is not qualified, and is therefore not ready for
+activation.**
+
+#### The qualification matrix
+
+Before M3 can be called complete, every evidence/3 predicate is classified:
+
+1. **Must be exercised before M4** — it carries enforcement semantics nothing
+   else carries.
+2. **Aggregator only** — it composes predicates already exercised
+   independently and adds no semantics of its own. This has to be *shown*, by
+   demonstrating that the aggregate agrees with the conjunction of its parts
+   across the cases that would distinguish them, not asserted on inspection.
+3. **Not part of M4 authority** — with a concrete reason.
+
+A class-1 predicate is never left unexercised on the grounds that its input
+shape does not exist yet. If M4 will depend on it, M3 builds the
+non-authoritative surface that exercises it first.
+
+The predicates unreachable after M2 classify as:
+
+| predicate | class | how M3 reaches it |
+| --- | --- | --- |
+| `behavioural_status` | 1 | shadow behavioural gate over a v2-executed command |
+| `target_projection` | 1 | per-gate projection recorded in the shadow row |
+| `runtime_identity` | 1 | `[shadow.runtime] facts_file` |
+| `baseline_record` | 1 | non-authoritative baseline capture |
+| `governing_definitions` | 1 | governance comparison against that baseline |
+| `definition_change` | 1 | same |
+| `governance_status` | 1 | same |
+| `ci_step_status` | 1 | raw step conclusions preserved in the CI shadow |
+| `gate_admissibility` | 2 | called by the comparator, and shown equal to its parts |
+
+#### `attest` gets a shadow representation
+
+Not for symmetry. M4 cannot make evidence/3 authoritative for a record class
+that M3 never exercised through evidence/3, and judgment is a record class.
+
+An attestation has no execution, and its shadow must not pretend otherwise.
+Nothing is re-run to manufacture it: the shadow is derived from the
+authoritative attestation already recorded, and that attestation is unchanged
+by its existence.
+
+The one thing a v2 attestation cannot supply is the binding §C requires —
+*which* execution was judged, over *which* artifacts. That binding is named
+explicitly rather than discovered by looking around for a plausible execution,
+and naming it affects the shadow alone: the authoritative record is
+byte-identical with and without it.
+
+#### `ci_step_status` is in the M4 contract
+
+`ci_provenance_status` establishes that a job belongs to this commit, run,
+attempt, workflow and repository. It says nothing about what the step
+concluded. `import-ci` reads that conclusion inline today; under evidence/3
+`ci_step_status` reads it, and it is the predicate separating a step that
+passed from one that was skipped, cancelled, unfinished or absent — which is
+the difference between evidence and its absence.
+
+So it is class 1, and the CI shadow preserves the **raw step conclusions** it
+was given. The v3 predicate is then exercised against the same payload v2
+derived its answer from, rather than against a summary of that answer, which
+would only establish that the summary was copied correctly.
+
+#### Baseline and governance are in the M4 contract
+
+`DEFINITION CHANGE PENDING` is a terminal state (§L2), and a terminal state the
+product has never reached is not qualified. So M3 introduces a baseline capture
+surface.
+
+It is non-authoritative in the strict sense: **a missing baseline is not an
+error.** Composition never reads it, no verdict depends on it, and the
+governance comparison reports `N/A` in its absence exactly as it did after M2.
+Baseline capture must not become a prerequisite by the back door during M3;
+whether it becomes one belongs to M4.
+
+#### What qualification produces
+
+M3 produces a **qualification report**, not authority. It distinguishes four
+outcomes:
+
+- **qualified** — the predicate was exercised, and evidence/3 read the
+  execution as v2 did;
+- **disagreement** — it was exercised and the two readings differ;
+- **not comparable** — the records could not be paired, so nothing was
+  established either way;
+- **uncovered prerequisite** — the predicate is in the M4 contract and this
+  evidence set exercised it not at all.
+
+The last is the outcome M2 had no way to report, and it is the one that
+matters: a predicate nobody evaluated reads exactly like one that passed unless
+the report separates them.
+
+A qualification failure may fail the qualification command. It must not rewrite
+the authoritative result of the task underneath it, and M3 status is never
+routed into the v2 composite or into `READY FOR HUMAN GATE`.
+
+#### Coverage criteria
+
+Qualification holds when all of this holds:
 
 - the shadow path has run the ordinary end-to-end workflow — baseline, local
   gates, attestations, CI import, composition — not a contrived one;
 - the adversarial cases gathered in item 11 have been exercised **through the
-  shadow path**, not only against the predicates directly;
-- the two cases item 11 names and skips are resolved once their prerequisites
-  exist: the findings ledger (decision H) and the end-to-end case that needs
-  evidence/3 to be authoritative;
+  shadow surfaces**, not only against the predicates directly, and for each one
+  the surface that exercised it is named;
+- every class-1 predicate has been exercised, and every class-2 aggregator
+  shown equal to its parts;
+- the two cases item 11 names and skips are resolved **once their prerequisites
+  actually exist** — the findings ledger (decision H) and the end-to-end case
+  needing evidence/3 to be authoritative. A skip is not resolved by being
+  rewritten into something easier, and the skip count is not the measure;
 - v2 and v3 agree on every compared gate, or each disagreement is understood
   and resolved.
+
+A case that cannot be exercised leaves M3 incomplete, unless the feature is
+explicitly removed from the M4 authority contract and the removal recorded
+here.
 
 **A green suite is not qualification.** The suite was green throughout items
 1-11 while the product exercised none of that code, which is precisely the
@@ -631,9 +828,13 @@ worth keeping accurate while the model is dormant behind a v2 CLI.
 
 - The CLI emits `verification.ladder.evidence/2` and composes under v2 rules
   until M4. Items 1-11 are complete and none of them changed that.
-- A behavioural gate gains CI authority only where the policy declares
-  `[gates.ci.<name>]` for it. It is never inferred from the gate being
-  behavioural.
+- A behavioural gate gains CI authority only where the policy declares CI for
+  it — `[gates.ci.<name>]`, or `[shadow.gates.ci.<name>]` in the shadow layer.
+  It is never inferred from the gate being behavioural.
+- The `[shadow]` policy layer (§M2a) creates no authority. It never executes a
+  command, never satisfies a requirement, and never alters a v2 record, verdict
+  or exit code. v3 syntax in the authoritative `[gates.*]` namespace is still
+  refused.
 - `VERSION` stays `0.1.0` until M4.
 - §L5's migration baseline stays pinned at `202bf35`. Later commits in the
   migration task do not move the anchor; that is what naming an immutable one
@@ -1093,9 +1294,17 @@ last of which is its own review point:
     no verdict or exit code changed.
 13. **Comparison** (§M2) — v2 and v3 outcomes compared per gate, disagreements
     surfaced diagnostically and never applied.
-14. **Qualification** (§M3) — the shadow path exercised by the ordinary
-    end-to-end workflow and by item 11's adversarial cases, with the two named
-    skips resolved. A green suite is not qualification.
+14. **Qualification** (§M3), in the order its prerequisites appear:
+    a. the shadow-only v3 policy layer (§M2a), with behavioural gates, declared
+       artifacts and the runtime dimension — no authority, no execution;
+    b. the attestation shadow representation, with its execution binding named
+       rather than discovered;
+    c. the baseline capture and CI step provenance the governance and
+       `ci_step_status` predicates need, both non-authoritative;
+    d. the qualification report itself — qualified, disagreement, not
+       comparable, uncovered prerequisite — and item 11's adversarial cases
+       driven through the shadow surfaces rather than against the predicates.
+    A green suite is not qualification.
 15. **Authority switch** (§M4) — evidence/3 becomes authoritative, `VERSION`
     moves to `0.2.0`, in a commit of its own.
 
