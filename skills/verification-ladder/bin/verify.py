@@ -69,6 +69,11 @@ EVIDENCE_MODES = ("execution", "execution+attestation")
 # INADMISSIBLE is not a failure of the change: it says the evidence cannot be
 # read at all, because it does not carry a dimension its own gate declares.
 ADMISSIBLE, INADMISSIBLE = "ADMISSIBLE", "INADMISSIBLE"
+# Keys that only an evidence/3 per-gate declaration carries. Their presence is
+# what separates "this policy is written in the v3 form" from "this gate name
+# has a dot in it", which read identically once TOML has parsed them.
+V3_DECLARATION_KEYS = frozenset({"command", "step", "driver", "target", "evidence_mode",
+                                 "spec_root", "spec_files", "artifacts", "authorities"})
 # Where a repository declares what "verified" means for it. The first file that
 # carries a policy wins; pyproject.toml lets a Python project keep one config file.
 POLICY_FILES = (("verification.toml", ()), ("pyproject.toml", ("tool", "verification")))
@@ -233,8 +238,43 @@ def policy(repo: Path) -> dict:
         for key in path:
             declared = declared.get(key) if isinstance(declared, dict) else None
         if isinstance(declared, dict) and declared:
+            refuse_inactive_v3(declared, config)
             return declared
     raise blocked(f"{repo}: {ONBOARDING}")
+
+
+def refuse_inactive_v3(declared: dict, config: Path) -> None:
+    """Name evidence/3 policy syntax for what it is, rather than misreading it.
+
+    `docs/design/evidence-v3.md` documents per-gate tables and this release acts
+    on the v2 form only, so read as v2 the documented syntax produces two wrong
+    answers. `[gates.local.lint]` is a table where a command string belongs, and
+    the reader blames a dotted gate name - for a gate with no dot in it.
+    `[gates.ci.x]` and `[gates.behavioral.x]` are not read at all, so a required
+    gate declared there silently reads MISSING. Both fail closed, and both
+    misdiagnose a policy that said clearly what it meant.
+
+    This is diagnosis only. It does not act on the declaration.
+    """
+    gates = declared.get("gates")
+    if not isinstance(gates, dict):
+        return
+    found = set()
+    for block in ("ci", "behavioral"):
+        if isinstance(gates.get(block), dict) and gates[block]:
+            found.add(f"[gates.{block}.*]")
+    local = gates.get("local")
+    if isinstance(local, dict):
+        for name, body in local.items():
+            if isinstance(body, dict) and V3_DECLARATION_KEYS & set(body):
+                found.add(f"[gates.local.{name}]")
+    if found:
+        raise blocked(
+            f"{config}: {', '.join(sorted(found))} is {SCHEMA_V3} policy syntax, which this release "
+            f"parses but does not act on - evidence/3 is implemented and not yet authoritative (see "
+            f"docs/design/evidence-v3.md). Declare gates in the form this release reads: "
+            f'[gates.local] name = "command", and [ci_steps] name = "step" for gates only CI can run.'
+        )
 
 
 def gate_map(declared: dict, *path: str) -> dict[str, str]:
