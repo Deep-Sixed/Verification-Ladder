@@ -564,6 +564,83 @@ The alternative — a documented one-time migration with no legacy parsing — i
 acceptable, provided it does not pretend the new policy governed its own
 introduction.
 
+## M. Activation is staged, not a switch
+
+Everything above describes what evidence/3 must establish. It says nothing about
+how the verifier comes to apply it, and the series ended at item 11 as though
+the last predicate landing were the same event as evidence/3 becoming
+authoritative. It is not, and the gap was measured rather than argued.
+
+A trace of every CLI subcommand after items 1-4 found **0 of 20 evidence/3
+functions reachable**. The model is exercised by its tests and by nothing else.
+A single authority switch would therefore make activation day the first time
+that code runs in the product — against records produced by a path that has
+never produced one — with the composer's verdict already resting on it.
+
+**Decision.** Activation is four stages, and the last is its own review point.
+
+### M1. Shadow emission
+
+v2 stays authoritative. v3 is emitted beside it, from the same workflow and the
+same run, so both representations describe one execution rather than two.
+
+Shadow emission must not alter the authoritative result. It adds a record; it
+changes no verdict, no exit code and no gate outcome. A v3 path that cannot
+produce a record says so and leaves v2 untouched.
+
+### M2. Comparison
+
+Where v2 and v3 describe the same gate, their outcomes are compared, and any
+disagreement is surfaced as a diagnostic.
+
+A disagreement never silently changes the v2 result. It is a finding about the
+v3 implementation, reported where someone will read it, and it fails the
+activation criteria rather than the task in hand. The point of shadow mode is to
+find those disagreements while they are still free.
+
+### M3. Qualification
+
+Shadow output qualifies activation only when all of it holds:
+
+- the shadow path has run the ordinary end-to-end workflow — baseline, local
+  gates, attestations, CI import, composition — not a contrived one;
+- the adversarial cases gathered in item 11 have been exercised **through the
+  shadow path**, not only against the predicates directly;
+- the two cases item 11 names and skips are resolved once their prerequisites
+  exist: the findings ledger (decision H) and the end-to-end case that needs
+  evidence/3 to be authoritative;
+- v2 and v3 agree on every compared gate, or each disagreement is understood
+  and resolved.
+
+**A green suite is not qualification.** The suite was green throughout items
+1-11 while the product exercised none of that code, which is precisely the
+condition this stage exists to end.
+
+### M4. The authority switch
+
+Only after M3 may evidence/3 become authoritative, and that change is its own
+commit and its own review point — never a side effect of a stage that precedes
+it, and never reached by implication because the preceding work looked
+finished.
+
+`VERSION` moves to `0.2.0` at that commit and not before (§J): the package
+version should mean that evidence/3 is emitted and enforced, which is a claim
+worth keeping accurate while the model is dormant behind a v2 CLI.
+
+### Invariants that hold across all four stages
+
+- The CLI emits `verification.ladder.evidence/2` and composes under v2 rules
+  until M4. Items 1-11 are complete and none of them changed that.
+- A behavioural gate gains CI authority only where the policy declares
+  `[gates.ci.<name>]` for it. It is never inferred from the gate being
+  behavioural.
+- `VERSION` stays `0.1.0` until M4.
+- §L5's migration baseline stays pinned at `202bf35`. Later commits in the
+  migration task do not move the anchor; that is what naming an immutable one
+  was for.
+- Gate timeout and command execution semantics stay as deferred in §G3 and §G4.
+  Shadow mode does not reopen them.
+
 ---
 
 ## The schema
@@ -725,7 +802,9 @@ the current implementation and it is what the merge-run trap is made of.
 ### Mixing
 
 v2 and v3 records do **not** mix. A v2 record encountered during composition
-requires re-verification. (`load_record` already refuses a foreign schema with
+requires re-verification. Shadow emission (§M1) is not an exception to this: it
+produces two records describing one execution, composed separately under their
+own rules, and never one composite drawing on both. (`load_record` already refuses a foreign schema with
 BLOCKED; that behaviour is correct and is retained.)
 
 ## Completion rules
@@ -1005,6 +1084,20 @@ committed and reviewed. No evidence behaviour changes before then.
 10. **G1 and G2** — `run --gate` must load policy; artifact paths excluded from
     repository state by construction.
 11. **Adversarial regression suite.**
+
+Items 1-11 land the model and the predicates. They do not activate anything, and
+the series does not end with them — activation is four further stages (§M), the
+last of which is its own review point:
+
+12. **Shadow emission** (§M1) — v3 emitted beside v2, v2 still authoritative,
+    no verdict or exit code changed.
+13. **Comparison** (§M2) — v2 and v3 outcomes compared per gate, disagreements
+    surfaced diagnostically and never applied.
+14. **Qualification** (§M3) — the shadow path exercised by the ordinary
+    end-to-end workflow and by item 11's adversarial cases, with the two named
+    skips resolved. A green suite is not qualification.
+15. **Authority switch** (§M4) — evidence/3 becomes authoritative, `VERSION`
+    moves to `0.2.0`, in a commit of its own.
 
 ## Adversarial acceptance tests
 
