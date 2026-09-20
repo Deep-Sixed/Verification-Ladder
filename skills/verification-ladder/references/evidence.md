@@ -49,7 +49,8 @@ that a gate ran, and `compose` refuses to let one satisfy a required gate.
 
 `state_id` is a digest over HEAD plus every deviation from it - staged, unstaged
 and untracked content alike. Two checkouts share a state id only if they would
-verify identically. Ignored paths are invisible to `git status` and so do not
+verify identically - it does not cover the index, and two trees whose
+`git diff --cached` differs can share one. Ignored paths are invisible to `git status` and so do not
 perturb it, and a record excludes itself.
 
 A CI record carries `source` (run id, event, conclusion, URL) instead of a gate
@@ -120,12 +121,12 @@ VERIFICATION STATE: 950fcdccfb58 + sha256:bcdd250c...
   * container-build    PASS    execution    ci run 35472429403
     diff               PASS    attestation  agent
   --------------------------------------------------------------
-  UNRESOLVED FINDINGS      0
   BLOCKED REQUIRED GATES   0
   STALE EVIDENCE           0
   STATE MATCH              TRUE
+  CLEAN CLIMB              TRUE
   --------------------------------------------------------------
-  VERIFICATION COMPLETE    TRUE
+  READY FOR HUMAN GATE     TRUE
 ```
 
 Rows marked `*` are required. The predicate holds when:

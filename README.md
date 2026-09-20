@@ -67,12 +67,12 @@ VERIFICATION STATE: 7272888 + sha256:3130b1f9…
   * container-build    PASS    execution    ci run 35486373054
     diff               PASS    attestation  agent
   --------------------------------------------------------------
-  UNRESOLVED FINDINGS      0
   BLOCKED REQUIRED GATES   0
   STALE EVIDENCE           0
   STATE MATCH              TRUE
+  CLEAN CLIMB              TRUE
   --------------------------------------------------------------
-  VERIFICATION COMPLETE    TRUE
+  READY FOR HUMAN GATE     TRUE
 ```
 
 ## Procedure here, policy there

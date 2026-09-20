@@ -36,7 +36,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 SCHEMA = "verification.ladder.evidence/2"
-COMPOSITE = "verification.ladder.composite/1"
+COMPOSITE = "verification.ladder.composite/2"
 # The schema the model below describes. Nothing emits it yet: this is the data
 # model, its parsing and its validation, landed ahead of the rules that will use
 # it so the enforcement work is written against a settled shape. Records on disk
@@ -145,7 +145,12 @@ def _hash_path(digest: "hashlib._Hash", repo: Path, relative: str) -> None:
 def state_id(repo: Path, exclude: frozenset[str] = frozenset()) -> str:
     """Identify the exact state under verification: HEAD plus every deviation from it.
 
-    Two checkouts share a state id only if they would verify identically. Ignored
+    This identifies the git-visible worktree state covered by the verifier, and
+    that is narrower than "two checkouts that share it would verify identically".
+    It does not cover the index - two trees whose `git diff --cached` differs can
+    share one - nor ignored files, environment, toolchain, or any running system a
+    gate talks to. `repository_identity` adds the index; a runtime dimension
+    covers the rest, for gates that declare one. Ignored
     paths are invisible to `git status` and so do not perturb it; `exclude` drops
     the evidence files themselves, which are written after the state is captured.
     """
@@ -1174,15 +1179,21 @@ def summarize_composite(composite: dict, declared: dict, *, file) -> None:
         # A required gate nobody ran is not an absence of news; show it.
         if gate not in established:
             print(f"  * {gate:<18} {'MISSING':<7} {'-':<12} no evidence", file=file)
-    blocked_required = sum(1 for gate in required if gate not in established or next(
-        row["status"] for row in composite["rows"] if row["gate"] == gate) != PASS)
+    # Count on the same predicate completion uses. Counting PASS alone reported
+    # zero blocked gates beside a finding reading "attested, never executed",
+    # which is two instruments disagreeing about one row.
+    rows = {row["gate"]: row for row in composite["rows"]}
+    blocked_required = sum(1 for gate in required
+                           if gate not in rows or rows[gate]["status"] != PASS
+                           or rows[gate]["kind"] != EXECUTION)
+    clean = composite["verdict"] == COMPLETE
     print("  " + "-" * 62, file=file)
-    print(f"  UNRESOLVED FINDINGS      {len(composite['findings'])}", file=file)
     print(f"  BLOCKED REQUIRED GATES   {blocked_required}", file=file)
     print(f"  STALE EVIDENCE           {0 if state['match'] else len(composite['sources'])}", file=file)
     print(f"  STATE MATCH              {str(state['match']).upper()}", file=file)
+    print(f"  CLEAN CLIMB              {str(clean).upper()}", file=file)
     print("  " + "-" * 62, file=file)
-    print(f"  VERIFICATION COMPLETE    {str(composite['verdict'] == COMPLETE).upper()}", file=file)
+    print(f"  READY FOR HUMAN GATE     {str(clean).upper()}", file=file)
     for finding in composite["findings"]:
         print(f"    - {finding}", file=file)
     if not state["match"]:

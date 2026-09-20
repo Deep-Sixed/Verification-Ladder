@@ -148,12 +148,12 @@ every judgment rung is attested for this state, no finding is open, and every
 record still binds to the checkout in front of you:
 
 ```
-  UNRESOLVED FINDINGS      0
   BLOCKED REQUIRED GATES   0
   STALE EVIDENCE           0
   STATE MATCH              TRUE
+  CLEAN CLIMB              TRUE
   --------------------------------------------------------------
-  VERIFICATION COMPLETE    TRUE
+  READY FOR HUMAN GATE     TRUE
 ```
 
 Anything else is not complete. Do not restate the missing rows as prose and call

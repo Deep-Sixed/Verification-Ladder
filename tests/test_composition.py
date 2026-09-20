@@ -148,7 +148,8 @@ def test_composition_of_all_three_authorities_completes(tmp_path, repo):
     paths = [local_evidence(tmp_path, repo), ci_evidence(tmp_path, repo), attestation(tmp_path, repo)]
     code, output = run(repo, "compose", *map(str, paths), "--output", str(tmp_path / "composite.json"))
     assert code == 0, output
-    assert "VERIFICATION COMPLETE    TRUE" in output
+    assert "READY FOR HUMAN GATE     TRUE" in output
+    assert "CLEAN CLIMB              TRUE" in output
     composite = json.loads((tmp_path / "composite.json").read_text())
     assert composite["verdict"] == "COMPLETE"
     assert composite["findings"] == []
@@ -165,7 +166,26 @@ def test_an_attestation_cannot_satisfy_an_executable_gate(tmp_path, repo):
     code, output = run(repo, "compose", *map(str, paths))
     assert code == 1
     assert "container-build: attested, never executed" in output
-    assert "VERIFICATION COMPLETE    FALSE" in output
+    assert "READY FOR HUMAN GATE     FALSE" in output
+
+
+def test_the_summary_no_longer_claims_to_count_findings(tmp_path, repo):
+    """`UNRESOLVED FINDINGS 0` counted missing evidence, never findings anyone found."""
+    paths = [local_evidence(tmp_path, repo), ci_evidence(tmp_path, repo), attestation(tmp_path, repo)]
+    _, output = run(repo, "compose", *map(str, paths))
+    assert "UNRESOLVED FINDINGS" not in output, "an instrument the composer cannot support"
+    assert "VERIFICATION COMPLETE" not in output, "the machine reports readiness, not acceptance"
+    assert "CLEAN CLIMB" in output
+
+
+def test_a_required_gate_only_attested_is_counted_as_blocked(tmp_path, repo):
+    """The summary counted status alone, so it read 0 beside `attested, never executed`."""
+    claimed = tmp_path / "claimed.json"
+    run(repo, "attest", "--rung", "container-build", "--note", "looks fine", "--output", str(claimed))
+    _, output = run(repo, "compose", str(local_evidence(tmp_path, repo)), str(claimed))
+    assert "container-build: attested, never executed" in output
+    assert "BLOCKED REQUIRED GATES   1" in output, "two instruments must not disagree about one row"
+    assert "READY FOR HUMAN GATE     FALSE" in output
 
 
 def test_an_unattested_judgment_rung_blocks_completion(tmp_path, repo):
