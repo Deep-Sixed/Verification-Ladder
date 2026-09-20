@@ -1,0 +1,23 @@
+[project]
+name = "verification-ladder"
+version = "0.1.0"
+description = "A portable verification procedure and evidence machinery for coding agents"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Deep-Sixed" }]
+# The skill ships as files an agent reads and runs, not as an installed package.
+# verify.py depends on the standard library and git alone, so a checkout of this
+# repository is a working installation on any machine with Python 3.11+.
+dependencies = []
+
+[dependency-groups]
+# Pinned, and pinned identically in verification.toml and the workflow: a gate
+# whose tool floats is a gate whose result is not reproducible.
+dev = ["pytest==9.1.1", "ruff==0.16.8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
