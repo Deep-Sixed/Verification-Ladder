@@ -13,6 +13,7 @@ commands that satisfy it, come from that repository's own committed policy.
     python scripts/verify.py import-ci --run RUN.json --job JOB.json [--output PATH]
     python scripts/verify.py compose PATH... [--output PATH]
     python scripts/verify.py check PATH
+    python scripts/verify.py compare PATH          # diagnostic; decides nothing
 
 A gate result is evidence for one repository state and nothing else, so every
 record carries a state id taken over HEAD plus the working tree. `check` refuses
@@ -72,6 +73,11 @@ ADMISSIBLE, INADMISSIBLE = "ADMISSIBLE", "INADMISSIBLE"
 # A task that changes a verification definition is its own class, with its own
 # terminal state. A definition never governs its own introduction.
 DEFINITION_UNCHANGED, DEFINITION_PENDING = "NONE", "PENDING"
+# §M2 comparison outcomes. Four, not two: whether the evidence/3 reading agrees
+# with the authoritative execution is a different question from whether the two
+# could be compared at all, and collapsing them would hide the cases that matter
+# most - a predicate nobody could evaluate reads exactly like one that passed.
+AGREE, DISAGREE, NOT_COMPARABLE, NOT_APPLICABLE = "AGREE", "DISAGREE", "NOT COMPARABLE", "N/A"
 # Keys that only an evidence/3 per-gate declaration carries. Their presence is
 # what separates "this policy is written in the v3 form" from "this gate name
 # has a dot in it", which read identically once TOML has parsed them.
@@ -928,6 +934,196 @@ def load_shadow_record(path: Path) -> dict:
     return record
 
 
+def shadow_path_for(record: Path) -> Path:
+    """Where §M1 wrote the shadow for this authoritative record.
+
+    Derived, never discovered. Globbing the shadow directory and taking the
+    newest file would pair whatever happens to be there with whatever is being
+    read, which is the failure mode this mapping exists to make impossible.
+    """
+    return record.parent / SHADOW_DIR / (record.stem + ".v3.json")
+
+
+def pair_shadow(record_path: Path, authoritative: dict) -> tuple[dict | None, str | None]:
+    """The shadow record for this execution, or why there is not one to compare.
+
+    Identity before comparison. Matching gate names is not identity: the same gate
+    runs many times, and a shadow left behind by an earlier run sits at the same
+    path as the one this run should have written. Everything the two records both
+    carry has to agree before either is read as describing the other's execution.
+    """
+    path = shadow_path_for(record_path)
+    if not path.exists():
+        return None, f"no shadow record at {path.name}; §M1 emits one beside every execution"
+    try:
+        shadow = load_shadow_record(path)
+    except SystemExit:
+        return None, f"{path.name} is not a readable {SCHEMA_V3} shadow record"
+    repository = (shadow.get("target_state") or {}).get("repository") or {}
+    checks = (
+        ("head", (authoritative["repository"]["head"], repository.get("head"))),
+        ("repository state", (authoritative["repository"]["state_id"], repository.get("worktree_state"))),
+        ("recording time", (authoritative.get("recorded_at"), shadow.get("recorded_at"))),
+        ("gate set", (authoritative.get("gate_set"), shadow.get("gate_set"))),
+        ("drift", (authoritative.get("drift"), shadow.get("drift"))),
+        ("gate roster", ([g["name"] for g in authoritative["gates"]],
+                         [g["gate"] for g in shadow.get("gates", [])])),
+    )
+    for what, (left, right) in checks:
+        if left != right:
+            return None, (f"{path.name} describes another execution: {what} differs "
+                          f"({left!r} here, {right!r} there)")
+    return shadow, None
+
+
+def _row(gate: str, predicate: str, outcome: str, observed=None, derived=None, why: str = "") -> dict:
+    return {"gate": gate, "predicate": predicate, "outcome": outcome,
+            "v2_observed": observed, "v3_derived": derived, "why": why}
+
+
+def compare_gate(repo: Path, executed: dict, derived: dict, governing: dict,
+                 current_target: dict, judgments) -> list[dict]:
+    """Every evidence/3 predicate that is meaningful for one compared gate.
+
+    Diagnostic only. Nothing here decides anything about the task: the
+    authoritative verdict was fixed before this ran and is not revisited.
+    """
+    name = executed["name"]
+    rows = []
+
+    rows.append(_row(name, "outcome", AGREE if executed["status"] == derived["status"] else DISAGREE,
+                     executed["status"], derived["status"],
+                     "the evidence/3 reading of this gate must not differ from what was executed"))
+    rows.append(_row(name, "kind", AGREE if executed["kind"] == derived["kind"] else DISAGREE,
+                     executed["kind"], derived["kind"],
+                     "an execution read as a judgment, or the reverse, would satisfy the wrong requirement"))
+
+    if name not in governing:
+        rows.append(_row(name, "definition", NOT_COMPARABLE, "undeclared", derived.get("definition"),
+                         "the policy declares no such gate, so there is no definition to bind to"))
+        rows.append(_row(name, "authority", NOT_COMPARABLE, executed.get("command"), None,
+                         "authority is declared per gate; an undeclared gate has none"))
+    else:
+        status, reason = definition_status({"gate": name, "definition_sha256": derived.get("definition_sha256")},
+                                           governing)
+        rows.append(_row(name, "definition", AGREE if status == ADMISSIBLE else DISAGREE,
+                         governing[name]["definition_sha256"], derived.get("definition_sha256"),
+                         reason or "the definition in force is the one this evidence was produced under"))
+        status, reason = authority_status(name, derived.get("authority") or "local", governing)
+        rows.append(_row(name, "authority", AGREE if status == ADMISSIBLE else DISAGREE,
+                         derived.get("authority") or "local", governing[name]["permitted_authorities"],
+                         reason or "only a declared authority may establish this gate"))
+
+        status, reason = kind_status({"gate": name, "kind": derived["kind"]}, governing, judgments)
+        rows.append(_row(name, "kind requirement", AGREE if status == ADMISSIBLE else DISAGREE,
+                         derived["kind"], governing[name]["evidence_mode"],
+                         reason or "the requirement takes the kind of evidence it takes"))
+
+        declared_target = governing[name]["target"]
+        status, reason = projection_status(derived.get("target_state") or {}, declared_target, current_target)
+        rows.append(_row(name, "target projection",
+                         AGREE if status == ADMISSIBLE else (NOT_COMPARABLE if status == INADMISSIBLE else DISAGREE),
+                         declared_target, sorted(derived.get("target_state") or {}),
+                         reason or "compared on exactly the dimensions this gate declares"))
+
+        if governing[name]["evidence_mode"] == "execution+attestation":
+            status, reason = behavioural_status({**derived, "gate": name}, governing, [derived], repo)
+            rows.append(_row(name, "artifact chain", AGREE if status == ADMISSIBLE else DISAGREE,
+                             "execution recorded", derived.get("artifacts"),
+                             reason or "the execution and the judgment over it bind to the same bytes"))
+        else:
+            rows.append(_row(name, "artifact chain", NOT_APPLICABLE, None, None,
+                             "this gate is an execution alone; no artifacts are judged"))
+    return rows
+
+
+def compare_records(repo: Path, record_path: Path, authoritative: dict, declared: dict) -> dict:
+    """Read the shadow beside one authoritative record and say where the two differ.
+
+    §M2. The comparison acquires no authority: v2 decided the outcome, this
+    reports whether evidence/3 would have read the same execution the same way.
+    A disagreement disqualifies the v3 path, not the task.
+    """
+    shadow, reason = pair_shadow(record_path, authoritative)
+    if shadow is None:
+        return {"paired": False, "reason": reason, "rows": []}
+
+    governing = gate_definitions(repo, declared)
+    judgments = declared.get("judgment_rungs") or []
+    current_target = {"repository": repository_identity(repo, relative_inside(repo, []))}
+    derived_by_name = {g["gate"]: {**g, "authority": shadow.get("authority"),
+                                   "target_state": shadow.get("target_state")}
+                       for g in shadow["gates"]}
+
+    rows = []
+    status, why = verifier_status([shadow])
+    rows.append(_row("-", "verifier contract", AGREE if status == ADMISSIBLE else DISAGREE,
+                     COMPATIBILITY, (shadow.get("verifier") or {}).get("compatibility"),
+                     why or "records compose only under one set of admissibility rules"))
+    rows.append(_row("-", "governance", NOT_APPLICABLE, None, None,
+                     "no baseline record exists for this task, so there is no governing "
+                     "definition captured before the change to compare against"))
+    if shadow.get("source"):
+        source = shadow["source"]
+        expected = {"head_sha": authoritative["repository"]["head"], "repository": source.get("repository"),
+                    "workflow": source.get("workflow"), "job": source.get("job"),
+                    "events": declared.get("ci_head_events") or ["push"]}
+        run = {"id": source.get("run_id"), "head_sha": source.get("head_sha"), "event": source.get("event"),
+               "run_attempt": source.get("run_attempt"), "path": source.get("workflow"),
+               "repository": {"full_name": source.get("repository")}}
+        job = {"run_id": source.get("job_run_id"), "run_attempt": source.get("run_attempt"),
+               "head_sha": source.get("head_sha"), "name": source.get("job")}
+        status, why = ci_provenance_status(run, job, expected)
+        rows.append(_row("-", "ci provenance", AGREE if status == ADMISSIBLE else DISAGREE,
+                         source.get("run_id"), source.get("job_run_id"),
+                         why or "repository, run, attempt, workflow, job, step and commit are one chain"))
+
+    for executed in authoritative["gates"]:
+        derived = derived_by_name.get(executed["name"])
+        if derived is None:
+            rows.append(_row(executed["name"], "pairing", NOT_COMPARABLE, executed["status"], None,
+                             "the shadow record holds no row for this gate"))
+            continue
+        rows.extend(compare_gate(repo, executed, derived, governing, current_target, judgments))
+    return {"paired": True, "reason": None, "rows": rows, "shadow": shadow}
+
+
+def command_compare(args) -> int:
+    """Report where the evidence/3 reading of an execution differs from the executed one.
+
+    §M2, and it changes nothing. The authoritative record was written and its
+    verdict fixed before this command could run; the exit code here describes the
+    comparison, never the task.
+    """
+    repo = require_repository(Path(args.repo).resolve())
+    record_path = Path(args.path).resolve()
+    authoritative = load_record(record_path)
+    comparison = compare_records(repo, record_path, authoritative, policy(repo))
+    print(f"SHADOW COMPARISON (evidence/3, diagnostic - the task verdict is in {record_path.name})\n")
+    if not comparison["paired"]:
+        print(f"  NOT COMPARABLE  {comparison['reason']}")
+        print("\n  No comparison was made. This does not change the authoritative result.")
+        return EXIT[BLOCKED]
+    for row in comparison["rows"]:
+        print(f"  {row['outcome']:<15} {row['gate']:<16} {row['predicate']}")
+        if row["outcome"] in (DISAGREE, NOT_COMPARABLE):
+            print(f"                    executed: {row['v2_observed']!r}")
+            print(f"                    evidence/3: {row['v3_derived']!r}")
+            print(f"                    {row['why']}")
+    disagreements = [r for r in comparison["rows"] if r["outcome"] == DISAGREE]
+    incomparable = [r for r in comparison["rows"] if r["outcome"] == NOT_COMPARABLE]
+    print("\n  " + "-" * 62)
+    print(f"  AGREE {sum(1 for r in comparison['rows'] if r['outcome'] == AGREE)}"
+          f"  DISAGREE {len(disagreements)}"
+          f"  NOT COMPARABLE {len(incomparable)}"
+          f"  N/A {sum(1 for r in comparison['rows'] if r['outcome'] == NOT_APPLICABLE)}")
+    print("  " + "-" * 62)
+    print(f"  EVIDENCE/3 QUALIFIED     {str(not disagreements and not incomparable).upper()}"
+          f"   (§M3 decides activation; this is one input)")
+    print("  The authoritative verdict is unchanged by anything above.")
+    return EXIT[BLOCKED] if incomparable else (EXIT[FAIL] if disagreements else EXIT[PASS])
+
+
 def load_json(path: Path) -> dict:
     try:
         return json.loads(path.read_text())
@@ -1355,6 +1551,11 @@ def main(argv: list[str] | None = None) -> int:
     composer.add_argument("paths", nargs="+", help="evidence records to compose")
     composer.add_argument("--output", help="write the composite here")
     composer.set_defaults(handler=command_compose)
+
+    comparer = sub.add_parser(
+        "compare", help="diagnostic: how the evidence/3 reading of an execution differs from it")
+    comparer.add_argument("path", help="the authoritative evidence/2 record to compare against")
+    comparer.set_defaults(handler=command_compare)
 
     checker = sub.add_parser("check", help="re-bind a record to the current state")
     checker.add_argument("path", help="evidence record to check")
