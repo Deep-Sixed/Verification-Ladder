@@ -1,9 +1,13 @@
 # Evidence v3 — admissibility as a single invariant
 
-**Status: design note. Documentation only; no implementation accompanies it.**
-Nothing in this note is built. It fixes the shape of
-`verification.ladder.evidence/3` so that the enforcement work can be implemented
-against a settled schema rather than discovered during it.
+**Status: the model is implemented and is not authoritative.** This note fixed
+the shape of `verification.ladder.evidence/3` so the enforcement work could be
+written against a settled schema rather than discovering one. Items 1-14 of the
+series below have landed. Records on disk are still `evidence/2`, `compose`
+still applies v2 rules, and every verdict and exit code the CLI produces is
+still v2's; evidence/3 is emitted beside them, read by `compare` and `qualify`,
+and decides nothing. §M4 — the authority switch — has not happened and is its
+own review point.
 
 ## The problem
 
@@ -1263,10 +1267,11 @@ the general rule.
 
 ---
 
-## Implementation series (after this note is reviewed)
+## Implementation series
 
-Nothing here begins until this note — including decisions I, J and K — is
-committed and reviewed. No evidence behaviour changes before then.
+Written before any of it began, and kept as written. Items 1-14 have landed;
+item 15 is §M4 and has not. No authoritative evidence behaviour changed in any
+of items 1-14.
 
 1. **Schema-v3 data model**, parsing and validation — including legacy v2
    policy normalization and the migration baseline (§L5, §L6).
