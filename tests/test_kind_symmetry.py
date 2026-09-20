@@ -69,13 +69,13 @@ def _artifact(repo, name, body):
 
 def _behavioural(repo, artifacts):
     row = {"gate": "verify-login", "kind": verify.EXECUTION, "authority": "local",
-           "target_state": TARGET, "artifacts": artifacts}
+           "target_projection": TARGET, "artifacts": artifacts}
     row["record_id"] = verify.record_id(row)
     return row
 
 
 def _attestation(execution, artifacts, **over):
-    return {"gate": "verify-login", "kind": verify.ATTESTATION, "target_state": TARGET,
+    return {"gate": "verify-login", "kind": verify.ATTESTATION, "target_projection": TARGET,
             "execution_ref": execution["record_id"],
             "artifact_refs": [a["sha256"] for a in artifacts], **over}
 
@@ -136,7 +136,7 @@ def test_an_attestation_made_against_another_target_does_not_count(repo, governi
     artifacts = [_artifact(repo, "login.webm", b"frames")]
     execution = _behavioural(repo, artifacts)
     elsewhere = _attestation(execution, artifacts,
-                             target_state={"repository": {"head": "b" * 40}})
+                             target_projection={"repository": {"head": "b" * 40}})
     status, reason = verify.behavioural_status(execution, governing, [execution, elsewhere], repo)
     assert status == verify.INADMISSIBLE
     assert "different target" in reason

@@ -45,3 +45,44 @@ tests = "python -m pytest -q"
 lint = "Run ruff check ."
 tests = "Run python -m pytest -q"
 # container-build = "Run docker build -t app:ci ."
+
+# --- evidence/3, shadow only ------------------------------------------------
+#
+# Optional, and it establishes nothing. Everything under [shadow] describes how
+# the executions declared above are read under `verification.ladder.evidence/3`,
+# which is not authoritative (see docs/design/evidence-v3.md §M). A declaration
+# here cannot run a command, cannot satisfy a required gate, and cannot change a
+# verdict or an exit code. Delete the whole section and nothing about the result
+# changes; keep it and `verify.py compare` can tell you whether evidence/3 would
+# have read your executions the way v2 did.
+#
+# A gate named here is described ENTIRELY here: the shadow declaration replaces
+# that gate's [gates.local] / [ci_steps] entries in the evidence/3 view rather
+# than merging into them. So authority stays declared - a gate has `ci` authority
+# only where [shadow.gates.ci.<name>] says so, never because it is behavioural.
+#
+# A gate declared here that nothing above executes stays unpaired. It does not
+# become executable by being written down.
+
+# The runtime dimension, read from a JSON object rather than probed: a shadow
+# declaration that ran a command to collect runtime facts would be creating
+# execution. Absent or unreadable means the runtime cannot be interrogated,
+# which is BLOCKED at comparison time and a missing dimension at record time.
+# Keep it out of the tracked tree, or moving the runtime also moves the
+# repository state and the two dimensions stop being separable.
+# [shadow.runtime]
+# facts_file = ".verification/runtime.json"
+
+# A behavioural gate: the machine establishes that the path ran and produced
+# these artifacts, an attestation establishes that someone read what they show,
+# and neither absorbs the other. `spec_files` are the declared definition of what
+# this gate means - declared, never observed, because an agent reading Markdown
+# cannot be watched. Artifact paths belong under .verification/, which is
+# excluded from repository state by construction.
+# [shadow.gates.behavioral.verify-login]
+# driver = "node drive-login.mjs"
+# target = ["repository", "runtime"]
+# evidence_mode = "execution+attestation"
+# spec_root = "docs/journeys"
+# spec_files = ["docs/journeys/login.md"]
+# artifacts = [".verification/artifacts/login-journey.json"]

@@ -78,11 +78,18 @@ DEFINITION_UNCHANGED, DEFINITION_PENDING = "NONE", "PENDING"
 # could be compared at all, and collapsing them would hide the cases that matter
 # most - a predicate nobody could evaluate reads exactly like one that passed.
 AGREE, DISAGREE, NOT_COMPARABLE, NOT_APPLICABLE = "AGREE", "DISAGREE", "NOT COMPARABLE", "N/A"
+# An index holding exactly what HEAD holds. Named, not digested: see `index_state`.
+CLEAN_INDEX = "index:clean"
 # Keys that only an evidence/3 per-gate declaration carries. Their presence is
 # what separates "this policy is written in the v3 form" from "this gate name
 # has a dot in it", which read identically once TOML has parsed them.
 V3_DECLARATION_KEYS = frozenset({"command", "step", "driver", "target", "evidence_mode",
                                  "spec_root", "spec_files", "artifacts", "authorities"})
+# The shadow-only evidence/3 policy layer (§M2a). Its own subtree, read by the
+# shadow path and by nothing else: the authoritative parser never looks here, and
+# a declaration here executes nothing, satisfies nothing and blocks nothing.
+SHADOW_POLICY = "shadow"
+SHADOW_BLOCKS = ("local", "ci", "behavioral")
 # Where a repository declares what "verified" means for it. The first file that
 # carries a policy wins; pyproject.toml lets a Python project keep one config file.
 POLICY_FILES = (("verification.toml", ()), ("pyproject.toml", ("tool", "verification")))
@@ -311,11 +318,85 @@ def gate_map(declared: dict, *path: str) -> dict[str, str]:
 
 
 def local_gates(declared: dict) -> list[tuple[str, str]]:
-    """The gates this checkout can execute, named by the repository's policy."""
+    """The gates this checkout can execute, named by the repository's policy.
+
+    Read from the authoritative policy alone. `[shadow]` is not consulted here
+    and must never be: a shadow declaration that could put a command in this
+    list would be creating execution, which is the one thing §M2a forbids it.
+    """
     gates = gate_map(declared, "gates", "local")
     if not gates:
         raise blocked("policy declares no [gates.local]; nothing can be executed here")
     return list(gates.items())
+
+
+def shadow_declaration(declared: dict) -> dict:
+    """The evidence/3 view of this policy: the v2 gates, overlaid by `[shadow.gates]`.
+
+    §M2a. The overlay **replaces** a gate's authoritative declarations rather
+    than merging into them. Merging would give a behavioural gate two `local`
+    declarations - the command v2 runs and the driver v3 describes - and the two
+    meanings would have to be reconciled by inference. Replacing keeps one answer
+    to what a gate means under evidence/3, and keeps authority declared: a shadow
+    gate has `ci` authority only where `[shadow.gates.ci.<name>]` says so.
+
+    Nothing here is authoritative. This view never reaches `local_gates`,
+    `gate_map`, `compose` or any verdict; it decides only how an execution that
+    already happened is read under evidence/3.
+    """
+    shadow = declared.get(SHADOW_POLICY)
+    overlay = (shadow or {}).get("gates") if isinstance(shadow, dict) else None
+    overlay = overlay if isinstance(overlay, dict) else {}
+    spoken_for = {name for block in SHADOW_BLOCKS if isinstance(overlay.get(block), dict)
+                  for name in overlay[block]}
+
+    view: dict = {"gates": {}}
+    base = declared.get("gates")
+    authoritative = ((base.get("local") if isinstance(base, dict) else None) or {},
+                     declared.get("ci_steps") or {})
+    for table, into in zip(authoritative, ("local", "ci_steps"), strict=True):
+        for name, body in (table.items() if isinstance(table, dict) else ()):
+            if name in spoken_for:
+                continue
+            if into == "local":
+                view["gates"].setdefault("local", {})[name] = body
+            else:
+                view.setdefault("ci_steps", {})[name] = body
+    for block in SHADOW_BLOCKS:
+        table = overlay.get(block)
+        if isinstance(table, dict) and table:
+            view["gates"][block] = dict(table)
+    return view
+
+
+def shadow_runtime(repo: Path, declared: dict) -> dict | None:
+    """The runtime dimension, read from a declared manifest rather than probed.
+
+    A shadow probe that ran a command to collect runtime facts would be a shadow
+    declaration causing execution, which §M2a forbids. So the manifest is read:
+    `[shadow.runtime] facts_file` names a JSON object, and its absence is not an
+    error here. It means the runtime cannot be interrogated, which `projection_status`
+    reads as BLOCKED at comparison time and as a missing dimension at record time -
+    two different diagnoses that must not collapse into one.
+    """
+    shadow = declared.get(SHADOW_POLICY)
+    source = (shadow or {}).get("runtime") if isinstance(shadow, dict) else None
+    name = source.get("facts_file") if isinstance(source, dict) else None
+    if not isinstance(name, str) or not name:
+        return None
+    try:
+        facts = json.loads((repo / name).read_text())
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(facts, dict) or not facts:
+        return None
+    return runtime_identity(facts)
+
+
+def shadow_target(repo: Path, declared: dict, repository: dict) -> dict:
+    """The target a shadow record binds to: always repository, runtime when readable."""
+    runtime = shadow_runtime(repo, declared)
+    return {"repository": repository, **({"runtime": runtime} if runtime else {})}
 
 
 # --- verification.ladder.evidence/3 model -------------------------------------
@@ -480,8 +561,32 @@ def gate_definition(repo: Path, name: str, gate: dict) -> dict:
             "target": gate["target"],
             "evidence_mode": gate["evidence_mode"],
             "permitted_authorities": sorted(gate["authorities"]),
+            # Declared artifact paths, carried so a record can digest what this
+            # gate said it would produce. Paths are part of `declaration` and so
+            # already fold into the digest below; repeating them here is a
+            # convenience for the recorder, not a second definition.
+            "artifacts": list(gate.get("artifacts") or []),
             "sources": sources,
             "definition_sha256": digest_of({"declaration": declaration, "sources": sources})}
+
+
+def gate_artifacts(repo: Path, definition: dict) -> list[dict]:
+    """Digest the artifacts a behavioural gate declared, from disk, after it ran.
+
+    An artifact that is not there is recorded as unreadable rather than raising.
+    The chain predicate is the thing that decides what a missing artifact means,
+    and losing the whole record to an exception would report that as "no shadow
+    was constructed" - absence of a comparison where there should be a failing one.
+    """
+    entries = []
+    for relative in sorted(definition.get("artifacts") or []):
+        try:
+            body = (repo / relative).read_bytes()
+        except OSError:
+            entries.append({"path": relative, "sha256": None})
+        else:
+            entries.append({"path": relative, "sha256": "sha256:" + hashlib.sha256(body).hexdigest()})
+    return entries
 
 
 def gate_definitions(repo: Path, declared: dict) -> dict[str, dict]:
@@ -521,8 +626,20 @@ def index_state(repo: Path) -> str:
     agent to read the diff, so the index is part of the state being verified.
     `ls-files --stage` names mode, blob and path for every entry, which is that
     content by identity rather than by re-reading it.
+
+    An index that matches HEAD is named rather than digested. Its content is a
+    function of the commit, so every clean checkout of one commit holds the same
+    index - but the digest is taken over local object paths and only a checkout
+    can produce it, so a CI record, which describes a pristine tree it does not
+    hand us, could never carry a matching one. Two records of one clean commit
+    would then describe two targets. `diff-index --cached` answers the question
+    exactly, and a staged difference of any kind still takes the digest.
     """
-    return "sha256:" + hashlib.sha256(git(repo, "ls-files", "--stage", "-z")).hexdigest()
+    try:
+        git(repo, "diff-index", "--cached", "--quiet", "HEAD")
+    except subprocess.CalledProcessError:
+        return "sha256:" + hashlib.sha256(git(repo, "ls-files", "--stage", "-z")).hexdigest()
+    return CLEAN_INDEX
 
 
 def repository_identity(repo: Path, exclude: frozenset[str] = frozenset()) -> dict:
@@ -530,6 +647,15 @@ def repository_identity(repo: Path, exclude: frozenset[str] = frozenset()) -> di
     return {"head": head_sha(repo),
             "index_state": index_state(repo),
             "worktree_state": state_id(repo, exclude)}
+
+
+def clean_repository_identity(sha: str) -> dict:
+    """The repository dimension CI can establish: a pristine checkout of one commit.
+
+    Stated in the same vocabulary a local clean checkout produces, so the two
+    compare. CI never has a dirty tree or a staged change, by construction.
+    """
+    return {"head": sha, "index_state": CLEAN_INDEX, "worktree_state": clean_state_id(sha)}
 
 
 def runtime_identity(facts: dict) -> dict:
@@ -623,7 +749,7 @@ def gate_admissibility(row: dict, governing: dict, current_target: dict) -> tupl
                            authority_status(row.get("gate"), row.get("authority"), governing)):
         if status != ADMISSIBLE:
             return status, reason
-    return projection_status(row.get("target_state") or {},
+    return projection_status(row.get("target_projection") or row.get("target_state") or {},
                              governing[row["gate"]]["target"], current_target)
 
 
@@ -687,7 +813,7 @@ def behavioural_status(row: dict, governing: dict, rows: list[dict], repo: Path)
         if set(candidate.get("artifact_refs") or []) != digests:
             return INADMISSIBLE, (f"{name!r}: its attestation judged a different set of artifacts "
                                   f"than the execution produced")
-        if candidate.get("target_state") != row.get("target_state"):
+        if candidate.get("target_projection") != row.get("target_projection"):
             return INADMISSIBLE, f"{name!r}: its attestation was made against a different target"
         return ADMISSIBLE, None
     return INADMISSIBLE, (f"{name!r} ran and produced artifacts, but nothing attests to what they show; "
@@ -847,12 +973,17 @@ def governance_status(baseline: dict, candidate: dict, rows: list[dict]) -> tupl
     return DEFINITION_PENDING, [f"{name}: candidate definition only" for name in under_candidate] or changed
 
 
-def shadow_gate(repo: Path, result: dict, definitions: dict) -> dict:
+def shadow_gate(repo: Path, result: dict, definitions: dict, target_state: dict) -> dict:
     """One gate's evidence/3 row, built from the v2 execution that already happened.
 
     From the result, never from a second run. Re-executing to manufacture the v3
     half would make the two records describe two executions, and shadow mode would
     then be comparing the verifier against itself on different evidence.
+
+    The row carries its own target projection rather than deferring to the
+    record's whole target: §I compares each gate on exactly the dimensions it
+    declared, and a row that carried the whole target would expire a lint gate
+    because a runtime it cannot depend on moved.
     """
     name = result["name"]
     row = {"gate": name, "kind": result["kind"], "status": result["status"]}
@@ -860,12 +991,15 @@ def shadow_gate(repo: Path, result: dict, definitions: dict) -> dict:
     if known:
         row |= {"definition_sha256": known["definition_sha256"],
                 "permitted_authorities": known["permitted_authorities"],
-                "target": known["target"], "evidence_mode": known["evidence_mode"]}
+                "target": known["target"], "evidence_mode": known["evidence_mode"],
+                "target_projection": target_projection(target_state, known["target"])}
+        if known["artifacts"] and result["kind"] == EXECUTION:
+            row["artifacts"] = gate_artifacts(repo, known)
     else:
         # A gate the policy does not declare - a custom --gate. It gets no
         # definition identity, because it has none: that is the point of §5.
         row["definition"] = "undeclared"
-    for field in ("exit_code", "reason", "step", "artifacts"):
+    for field in ("exit_code", "reason", "step"):
         if field in result:
             row[field] = result[field]
     row["record_id"] = record_id(row)
@@ -880,11 +1014,18 @@ def shadow_record(repo: Path, declared: dict, results: list[dict], authority: st
     against real executions before anything depends on it, and nothing reads it
     back - there is no v3 composer until §M2.
     """
-    definitions = gate_definitions(repo, declared)
+    view = shadow_declaration(declared)
+    definitions = gate_definitions(repo, view)
+    executed = {result["name"] for result in results}
     return {
         "schema": SCHEMA_V3,
         "shadow": True,
         "authority": authority,
+        # Gates the shadow layer declares that no authoritative gate executed.
+        # Named rather than dropped: a v3-only declaration does not become
+        # executable by being written down, and the comparison has to be able to
+        # say that it stayed unpaired rather than quietly covering fewer gates.
+        "unpaired": sorted(name for name in definitions if name not in executed),
         # Overridden by `recorded_at` in `extra`: the shadow describes the SAME
         # execution, so it carries that execution's recording time rather than
         # taking its own. Two now() calls a few milliseconds apart can straddle a
@@ -893,7 +1034,7 @@ def shadow_record(repo: Path, declared: dict, results: list[dict], authority: st
         "verifier": verifier_identity(),
         "target_state": target_state,
         "verification_spec": {"policy_sha256": digest_of(declared)},
-        "gates": [shadow_gate(repo, result, definitions) for result in results],
+        "gates": [shadow_gate(repo, result, definitions, target_state) for result in results],
         **extra,
     }
 
@@ -985,12 +1126,18 @@ def _row(gate: str, predicate: str, outcome: str, observed=None, derived=None, w
             "v2_observed": observed, "v3_derived": derived, "why": why}
 
 
-def compare_gate(repo: Path, executed: dict, derived: dict, governing: dict,
-                 current_target: dict, judgments) -> list[dict]:
+def compare_gate(repo: Path, executed: dict, derived: dict, authority: str, governing: dict,
+                 record_target: dict, current_target: dict, judgments, judged) -> list[dict]:
     """Every evidence/3 predicate that is meaningful for one compared gate.
 
     Diagnostic only. Nothing here decides anything about the task: the
     authoritative verdict was fixed before this ran and is not revisited.
+
+    The shadow row is read, never edited. An earlier draft folded the record's
+    authority and target into the row before handing it to the predicates, which
+    silently broke `record_id` recomputation - the identity check would have
+    failed for every behavioural gate, for a reason that had nothing to do with
+    the gate. Record-scoped facts are passed beside the row instead.
     """
     name = executed["name"]
     rows = []
@@ -1007,41 +1154,97 @@ def compare_gate(repo: Path, executed: dict, derived: dict, governing: dict,
                          "the policy declares no such gate, so there is no definition to bind to"))
         rows.append(_row(name, "authority", NOT_COMPARABLE, executed.get("command"), None,
                          "authority is declared per gate; an undeclared gate has none"))
+        return rows
+
+    claimed = {"gate": name, "authority": authority,
+               "definition_sha256": derived.get("definition_sha256"),
+               "target_projection": derived.get("target_projection")}
+
+    status, reason = definition_status(claimed, governing)
+    rows.append(_row(name, "definition", AGREE if status == ADMISSIBLE else DISAGREE,
+                     governing[name]["definition_sha256"], derived.get("definition_sha256"),
+                     reason or "the definition in force is the one this evidence was produced under"))
+    status, reason = authority_status(name, authority, governing)
+    rows.append(_row(name, "authority", AGREE if status == ADMISSIBLE else DISAGREE,
+                     authority, governing[name]["permitted_authorities"],
+                     reason or "only a declared authority may establish this gate"))
+
+    status, reason = kind_status({"gate": name, "kind": derived["kind"]}, governing, judgments)
+    rows.append(_row(name, "kind requirement", AGREE if status == ADMISSIBLE else DISAGREE,
+                     derived["kind"], governing[name]["evidence_mode"],
+                     reason or "the requirement takes the kind of evidence it takes"))
+
+    declared_target = governing[name]["target"]
+    # The row's projection must be the record's target narrowed to what this gate
+    # declared. Checked rather than assumed: the projection is what every later
+    # predicate reads, so a row carrying one its own record does not support is a
+    # row that answers for a target nobody recorded.
+    expected = target_projection(record_target, declared_target)
+    rows.append(_row(name, "projection binding",
+                     AGREE if derived.get("target_projection") == expected else DISAGREE,
+                     sorted(expected), sorted(derived.get("target_projection") or {}),
+                     "the recorded projection is this record's target, narrowed to this gate's dimensions"))
+    status, reason = projection_status(derived.get("target_projection") or {}, declared_target, current_target)
+    rows.append(_row(name, "target projection", _projection_outcome(status),
+                     declared_target, sorted(derived.get("target_projection") or {}),
+                     reason or "compared on exactly the dimensions this gate declares"))
+
+    if governing[name]["evidence_mode"] != "execution+attestation":
+        rows.append(_row(name, "artifact chain", NOT_APPLICABLE, None, None,
+                         "this gate is an execution alone; no artifacts are judged"))
+    elif judged is None:
+        # The judgment half of a behavioural gate lives in its own record. Saying
+        # DISAGREE because nobody handed us that record would report the
+        # comparison's own scope as a defect in the verifier.
+        rows.append(_row(name, "artifact chain", NOT_COMPARABLE, "execution recorded",
+                         derived.get("artifacts"),
+                         "no attestation record was offered to this comparison, so the judgment "
+                         "half of this gate was not in scope"))
     else:
-        status, reason = definition_status({"gate": name, "definition_sha256": derived.get("definition_sha256")},
-                                           governing)
-        rows.append(_row(name, "definition", AGREE if status == ADMISSIBLE else DISAGREE,
-                         governing[name]["definition_sha256"], derived.get("definition_sha256"),
-                         reason or "the definition in force is the one this evidence was produced under"))
-        status, reason = authority_status(name, derived.get("authority") or "local", governing)
-        rows.append(_row(name, "authority", AGREE if status == ADMISSIBLE else DISAGREE,
-                         derived.get("authority") or "local", governing[name]["permitted_authorities"],
-                         reason or "only a declared authority may establish this gate"))
+        status, reason = behavioural_status(derived, governing, [derived, *judged], repo)
+        rows.append(_row(name, "artifact chain", AGREE if status == ADMISSIBLE else DISAGREE,
+                         "execution recorded", derived.get("artifacts"),
+                         reason or "the execution and the judgment over it bind to the same bytes"))
 
-        status, reason = kind_status({"gate": name, "kind": derived["kind"]}, governing, judgments)
-        rows.append(_row(name, "kind requirement", AGREE if status == ADMISSIBLE else DISAGREE,
-                         derived["kind"], governing[name]["evidence_mode"],
-                         reason or "the requirement takes the kind of evidence it takes"))
-
-        declared_target = governing[name]["target"]
-        status, reason = projection_status(derived.get("target_state") or {}, declared_target, current_target)
-        rows.append(_row(name, "target projection",
-                         AGREE if status == ADMISSIBLE else (NOT_COMPARABLE if status == INADMISSIBLE else DISAGREE),
-                         declared_target, sorted(derived.get("target_state") or {}),
-                         reason or "compared on exactly the dimensions this gate declares"))
-
-        if governing[name]["evidence_mode"] == "execution+attestation":
-            status, reason = behavioural_status({**derived, "gate": name}, governing, [derived], repo)
-            rows.append(_row(name, "artifact chain", AGREE if status == ADMISSIBLE else DISAGREE,
-                             "execution recorded", derived.get("artifacts"),
-                             reason or "the execution and the judgment over it bind to the same bytes"))
-        else:
-            rows.append(_row(name, "artifact chain", NOT_APPLICABLE, None, None,
-                             "this gate is an execution alone; no artifacts are judged"))
+    # The aggregate M4 will call, beside the predicates it composes - and read as
+    # a check on itself rather than as a sixth opinion. It reports AGREE when it
+    # says exactly what definition, authority and projection said, so it can only
+    # disagree by diverging from its own parts. That is what "aggregator only"
+    # has to mean if it is to be shown rather than asserted.
+    parts = [r["outcome"] for r in rows if r["predicate"] in ("definition", "authority", "target projection")]
+    by_parts = all(outcome == AGREE for outcome in parts)
+    status, reason = gate_admissibility(claimed, governing, current_target)
+    rows.append(_row(name, "admissibility (aggregate)", AGREE if (status == ADMISSIBLE) == by_parts else DISAGREE,
+                     ADMISSIBLE if by_parts else "refused by a constituent predicate", status,
+                     reason or "the aggregate must say what definition, authority and projection say"))
     return rows
 
 
-def compare_records(repo: Path, record_path: Path, authoritative: dict, declared: dict) -> dict:
+def _projection_outcome(status: str) -> str:
+    """How an admissibility status reads as a comparison outcome.
+
+    INADMISSIBLE and BLOCKED are NOT COMPARABLE - the evidence could not be read
+    at all, which is a different report from evidence that was read and differed.
+    """
+    return AGREE if status == ADMISSIBLE else (DISAGREE if status == STALE else NOT_COMPARABLE)
+
+
+def shadow_governing(repo: Path, declared: dict) -> tuple[dict | None, str | None]:
+    """The gate definitions the shadow layer declares, or why it could not be read.
+
+    A malformed `[shadow]` policy is a shadow diagnostic. It does not block, and
+    it acquires no authority by being unreadable: a layer that could halt the
+    task by being wrong would already be authoritative.
+    """
+    try:
+        return gate_definitions(repo, shadow_declaration(declared)), None
+    except SystemExit:
+        return None, ("the [shadow] policy layer does not describe a set of gates; the diagnosis is "
+                      "above, and nothing about the authoritative result depends on it")
+
+
+def compare_records(repo: Path, record_path: Path, authoritative: dict, declared: dict,
+                    judged: list[dict] | None = None) -> dict:
     """Read the shadow beside one authoritative record and say where the two differ.
 
     §M2. The comparison acquires no authority: v2 decided the outcome, this
@@ -1052,12 +1255,13 @@ def compare_records(repo: Path, record_path: Path, authoritative: dict, declared
     if shadow is None:
         return {"paired": False, "reason": reason, "rows": []}
 
-    governing = gate_definitions(repo, declared)
+    governing, broken = shadow_governing(repo, declared)
+    if governing is None:
+        return {"paired": False, "reason": broken, "rows": []}
     judgments = declared.get("judgment_rungs") or []
-    current_target = {"repository": repository_identity(repo, relative_inside(repo, []))}
-    derived_by_name = {g["gate"]: {**g, "authority": shadow.get("authority"),
-                                   "target_state": shadow.get("target_state")}
-                       for g in shadow["gates"]}
+    current_target = shadow_target(repo, declared, repository_identity(repo, relative_inside(repo, [])))
+    derived_by_name = {gate["gate"]: gate for gate in shadow["gates"]}
+    authority = shadow.get("authority")
 
     rows = []
     status, why = verifier_status([shadow])
@@ -1068,19 +1272,7 @@ def compare_records(repo: Path, record_path: Path, authoritative: dict, declared
                      "no baseline record exists for this task, so there is no governing "
                      "definition captured before the change to compare against"))
     if shadow.get("source"):
-        source = shadow["source"]
-        expected = {"head_sha": authoritative["repository"]["head"], "repository": source.get("repository"),
-                    "workflow": source.get("workflow"), "job": source.get("job"),
-                    "events": declared.get("ci_head_events") or ["push"]}
-        run = {"id": source.get("run_id"), "head_sha": source.get("head_sha"), "event": source.get("event"),
-               "run_attempt": source.get("run_attempt"), "path": source.get("workflow"),
-               "repository": {"full_name": source.get("repository")}}
-        job = {"run_id": source.get("job_run_id"), "run_attempt": source.get("run_attempt"),
-               "head_sha": source.get("head_sha"), "name": source.get("job")}
-        status, why = ci_provenance_status(run, job, expected)
-        rows.append(_row("-", "ci provenance", AGREE if status == ADMISSIBLE else DISAGREE,
-                         source.get("run_id"), source.get("job_run_id"),
-                         why or "repository, run, attempt, workflow, job, step and commit are one chain"))
+        rows.extend(compare_ci_source(shadow, authoritative, declared, governing, derived_by_name))
 
     for executed in authoritative["gates"]:
         derived = derived_by_name.get(executed["name"])
@@ -1088,8 +1280,55 @@ def compare_records(repo: Path, record_path: Path, authoritative: dict, declared
             rows.append(_row(executed["name"], "pairing", NOT_COMPARABLE, executed["status"], None,
                              "the shadow record holds no row for this gate"))
             continue
-        rows.extend(compare_gate(repo, executed, derived, governing, current_target, judgments))
+        rows.extend(compare_gate(repo, executed, derived, authority, governing,
+                                 shadow.get("target_state") or {}, current_target, judgments, judged))
+    for name in shadow.get("unpaired") or []:
+        rows.append(_row(name, "pairing", NOT_COMPARABLE, None, "declared in the shadow layer",
+                         "the shadow layer declares this gate and no authoritative gate executed it; "
+                         "a v3 declaration does not become executable by being written down"))
     return {"paired": True, "reason": None, "rows": rows, "shadow": shadow}
+
+
+def compare_ci_source(shadow: dict, authoritative: dict, declared: dict, governing: dict,
+                      derived_by_name: dict) -> list[dict]:
+    """The CI provenance chain, and what each gate's step actually concluded.
+
+    Two predicates, not one. `ci_provenance_status` establishes that this job
+    belongs to this commit, run, attempt, workflow and repository; it says
+    nothing about what the step concluded. `ci_step_status` reads the conclusion,
+    from the raw step list the importer was given rather than from the status it
+    derived - reading back a summary of an answer only establishes that the
+    summary was copied correctly.
+    """
+    source = shadow["source"]
+    expected = {"head_sha": authoritative["repository"]["head"], "repository": source.get("repository"),
+                "workflow": source.get("workflow"), "job": source.get("job"),
+                "events": declared.get("ci_head_events") or ["push"]}
+    run = {"id": source.get("run_id"), "head_sha": source.get("head_sha"), "event": source.get("event"),
+           "run_attempt": source.get("run_attempt"), "path": source.get("workflow"),
+           "repository": {"full_name": source.get("repository")}}
+    job = {"run_id": source.get("job_run_id"), "run_attempt": source.get("run_attempt"),
+           "head_sha": source.get("head_sha"), "name": source.get("job"),
+           "steps": source.get("steps") or []}
+    status, why = ci_provenance_status(run, job, expected)
+    rows = [_row("-", "ci provenance", AGREE if status == ADMISSIBLE else DISAGREE,
+                 source.get("run_id"), source.get("job_run_id"),
+                 why or "repository, run, attempt, workflow, job, step and commit are one chain")]
+    if source.get("steps") is None:
+        rows.append(_row("-", "ci step", NOT_COMPARABLE, None, None,
+                         "this shadow record carries no raw step conclusions, so the evidence/3 "
+                         "reading of a step could not be evaluated against the payload v2 read"))
+        return rows
+    for name, derived in derived_by_name.items():
+        step = derived.get("step")
+        if step is None:
+            continue
+        status, why = ci_step_status(job, step)
+        executed_status = next((g["status"] for g in authoritative["gates"] if g["name"] == name), None)
+        rows.append(_row(name, "ci step", AGREE if status == executed_status else DISAGREE,
+                         executed_status, status,
+                         why or f"step {step!r} concluded what the authoritative record says it did"))
+    return rows
 
 
 def command_compare(args) -> int:
@@ -1268,7 +1507,7 @@ def command_run(args) -> int:
     # nothing below can change what was just reported.
     emit_shadow(repo, output, lambda: shadow_record(
         repo, declared, results, "local",
-        {"repository": repository_identity(repo, exclude)},
+        shadow_target(repo, declared, repository_identity(repo, exclude)),
         recorded_at=record["recorded_at"], drift=drift, gate_set=record["gate_set"]))
     return EXIT[record["verdict"]]
 
@@ -1362,7 +1601,7 @@ def command_import_ci(args) -> int:
     summarize(record, output, file=sys.stderr)
     emit_shadow(repo, output, lambda: shadow_record(
         repo, declared, gates, "ci",
-        {"repository": {"head": sha, "index_state": None, "worktree_state": clean_state_id(sha)}},
+        {"repository": clean_repository_identity(sha)},
         recorded_at=record["recorded_at"],
         source={"repository": (run.get("repository") or {}).get("full_name"),
                 "run_id": run.get("id"), "run_attempt": run.get("run_attempt"),

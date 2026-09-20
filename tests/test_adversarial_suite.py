@@ -47,7 +47,7 @@ def governing(repo):
 
 def _row(name, authority, governing, **over):
     return {"gate": name, "authority": authority, "kind": verify.EXECUTION,
-            "definition_sha256": governing[name]["definition_sha256"], "target_state": TARGET, **over}
+            "definition_sha256": governing[name]["definition_sha256"], "target_projection": TARGET, **over}
 
 
 def _refused(result):
@@ -181,7 +181,7 @@ def test_13_an_artifact_that_is_missing_or_rehashes_differently(repo, governing)
                   "sha256": "sha256:" + hashlib.sha256(body).hexdigest()}]
     execution = _row("verify-login", "local", governing, artifacts=artifacts)
     execution["record_id"] = verify.record_id(execution)
-    attestation = {"gate": "verify-login", "kind": verify.ATTESTATION, "target_state": TARGET,
+    attestation = {"gate": "verify-login", "kind": verify.ATTESTATION, "target_projection": TARGET,
                    "execution_ref": execution["record_id"],
                    "artifact_refs": [a["sha256"] for a in artifacts]}
     rows = [execution, attestation]
@@ -220,7 +220,7 @@ def test_17_an_attestation_for_a_different_gate_or_projection(repo, governing):
     execution = _row("verify-login", "local", governing, artifacts=artifacts)
     execution["record_id"] = verify.record_id(execution)
     elsewhere = {"gate": "verify-login", "kind": verify.ATTESTATION,
-                 "target_state": {"repository": {"head": "f" * 40}},
+                 "target_projection": {"repository": {"head": "f" * 40}},
                  "execution_ref": execution["record_id"],
                  "artifact_refs": [a["sha256"] for a in artifacts]}
     _refused(verify.behavioural_status(execution, governing, [execution, elsewhere], repo))
