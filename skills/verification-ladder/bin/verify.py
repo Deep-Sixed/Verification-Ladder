@@ -855,9 +855,24 @@ def load_record(path: Path) -> dict:
     return record
 
 
+EVIDENCE_DIR = ".verification"
+
+
 def relative_inside(repo: Path, paths) -> frozenset[str]:
-    """Evidence files written into the checkout must not perturb the state they describe."""
-    return frozenset(p.relative_to(repo).as_posix() for p in paths if p is not None and p.is_relative_to(repo))
+    """Evidence files written into the checkout must not perturb the state they describe.
+
+    The evidence directory is excluded whole, not just the paths this command was
+    handed. A run writes one record and names it, but the workflow also leaves
+    attestations, imported CI payloads and, under evidence/3, artifacts in there -
+    and a file this command did not name is still a file that moved the state it
+    was measuring. Relying on the consumer's `.gitignore` to hide them made
+    correctness depend on onboarding being remembered.
+    """
+    named = {p.relative_to(repo).as_posix() for p in paths if p is not None and p.is_relative_to(repo)}
+    evidence = repo / EVIDENCE_DIR
+    if evidence.is_dir():
+        named |= {f.relative_to(repo).as_posix() for f in evidence.rglob("*") if f.is_file()}
+    return frozenset(named)
 
 
 def new_record(repo: Path, authority: str, gates: list[dict], exclude: frozenset[str],
@@ -924,7 +939,13 @@ def verdict_of(gates: list[dict], drift: bool) -> str:
 
 def command_run(args) -> int:
     repo = require_repository(Path(args.repo).resolve())
-    gates = [tuple(spec.split("=", 1)) for spec in args.gate] if args.gate else local_gates(policy(repo))
+    # The policy is read whether or not gates were named on the command line. A
+    # custom gate is a diagnostic convenience; it never licenses a record from a
+    # repository that has declared nothing, which the documentation says is
+    # BLOCKED. Without this, `run --gate anything=true` emitted a PASS-shaped
+    # record against an ungoverned repository.
+    declared = policy(repo)
+    gates = [tuple(spec.split("=", 1)) for spec in args.gate] if args.gate else local_gates(declared)
     for spec in gates:
         if len(spec) != 2 or not spec[0] or not spec[1]:
             raise blocked(f"--gate expects NAME=COMMAND, got {'='.join(spec)!r}")

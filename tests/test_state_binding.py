@@ -30,6 +30,10 @@ def repo(tmp_path):
     checkout = tmp_path / "repo"
     subprocess.run(["git", "init", "-q", "-b", "main", str(checkout)], check=True)
     (checkout / "unit.py").write_text("VALUE = 1\n")
+    # A governed repository. `--gate` is a diagnostic convenience and no longer
+    # licenses a record against a repository that has declared nothing, so the
+    # tests that drive custom gates need a policy to be driving them against.
+    (checkout / "verification.toml").write_text('required_gates = []\n\n[gates.local]\nunit = "true"\n')
     subprocess.run(["git", "add", "-A"], cwd=checkout, check=True)
     subprocess.run(
         ["git", "-c", "user.email=ci@example.invalid", "-c", "user.name=ci", "commit", "-qm", "baseline"],
@@ -205,12 +209,14 @@ def test_gates_come_from_the_repository_not_from_this_tool(repo):
 
 def test_a_repository_with_no_policy_is_blocked_not_verified(repo):
     """Silence is not consent: an unconfigured project must never read as passing."""
+    (repo / "verification.toml").unlink()
     code, stdout = run(repo, "run")
     assert code == 2
     assert stdout.strip() == "", "no record is written for a state nothing was declared about"
 
 
 def test_the_onboarding_message_names_what_is_missing(repo):
+    (repo / "verification.toml").unlink()
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "--repo", str(repo), "run"], capture_output=True, text=True, check=False
     )
@@ -220,6 +226,7 @@ def test_the_onboarding_message_names_what_is_missing(repo):
 
 def test_a_broken_policy_is_reported_as_broken_not_as_missing(repo):
     """Otherwise the agent onboards a project that is already onboarded."""
+    (repo / "verification.toml").unlink()
     (repo / "verification.toml").write_text('required_gates = ["unclosed\n')
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "--repo", str(repo), "run"], capture_output=True, text=True, check=False
@@ -230,6 +237,7 @@ def test_a_broken_policy_is_reported_as_broken_not_as_missing(repo):
 
 
 def test_a_python_project_may_keep_its_policy_in_pyproject(repo):
+    (repo / "verification.toml").unlink()  # verification.toml wins; this tests the fallback
     (repo / "pyproject.toml").write_text(
         "[tool.verification]\n"
         'required_gates = ["unit"]\n\n'
@@ -245,3 +253,26 @@ def test_verification_toml_wins_over_pyproject(repo):
     (repo / "pyproject.toml").write_text('[tool.verification]\nrequired_gates = ["from-pyproject"]\n')
     (repo / "verification.toml").write_text('required_gates = ["from-verification-toml"]\n')
     assert verify.policy(repo)["required_gates"] == ["from-verification-toml"]
+
+
+def test_a_custom_gate_cannot_license_a_record_from_an_ungoverned_repository(repo):
+    """`--gate` is a diagnostic convenience, not a way past the onboarding refusal."""
+    (repo / "verification.toml").unlink()
+    code, _ = run(repo, "run", "--gate", f"anything={PASS_GATE}")
+    assert code == 2, "an unconfigured repository is BLOCKED, whatever gates were named"
+
+
+def test_the_evidence_directory_does_not_perturb_the_state_it_describes(repo):
+    """Two commands, each writing into .verification/, must agree on one state.
+
+    Each used to exclude only the file it was handed, so an attestation written
+    first made the later run see an extra untracked file and compute a different
+    state id - for one unchanged commit. A consumer's .gitignore hid it, which
+    made correctness depend on onboarding being remembered.
+    """
+    assert not (repo / ".gitignore").exists(), "the point is that this works without one"
+    run(repo, "attest", "--rung", "diff", "--note", "read it")
+    _, record = record_of(repo, ("unit", PASS_GATE), output=repo / ".verification" / "local.json")
+    attested = json.loads((repo / ".verification" / "attestations.json").read_text())
+    assert record["repository"]["state_id"] == attested["repository"]["state_id"]
+    assert record["drift"] is False
