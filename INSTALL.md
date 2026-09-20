@@ -50,25 +50,32 @@ When releases are cut, a tag becomes the thing to pin and this reads
 Upgrading stays deliberate: fetch, read what changed, check out the new commit,
 and re-verify anything in flight if evidence semantics moved.
 
-## Codex — not yet verified
+## Codex
 
-**This section is untested.** The Claude Code path above was checked against a
-running installation; the Codex equivalent has not been. Do not treat "both
-agents use the same installed skill" as established until you have confirmed it
-on your own Codex environment.
-
-The requirement is only that Codex resolves to *this* directory rather than to a
-copy. If Codex reads a skills directory the way Claude Code does, a link is
-enough:
+Codex Desktop was verified on 2026-09-20 with a linked user skill under
+`~/.codex/skills/<name>/`. The requirement is that Codex resolves to *this*
+directory rather than to a copy:
 
 ```sh
 mkdir -p ~/.codex/skills
 ln -s ~/src/verification-ladder/skills/verification-ladder ~/.codex/skills/verification-ladder
 ```
 
-Check that path against your Codex version's documentation before relying on it.
-Then run two different tests, because they establish different things and only
-one of them is decisive.
+The verified installation resolved:
+
+```text
+~/.codex/skills/verification-ladder
+  -> ~/src/verification-ladder/skills/verification-ladder
+```
+
+Codex loaded the linked `SKILL.md` from that path, read the nine-rung ladder,
+resolved `bin/verify.py` beside the skill, and ran the verifier from the linked
+tree. OpenAI's Codex documentation also says local skills may be symlinked; if
+your Codex build reports a different user-skill root, use that root with the
+same symlink target and run the checks below.
+
+Run two different tests, because they establish different things and only one of
+them is decisive.
 
 **Discovery** — can the agent find and read the skill?
 
@@ -90,10 +97,6 @@ repository is the one situation where a silent bypass is invisible in the
 output, because there is nothing to compare against and the work may well look
 finished. An agent that sails past it is an agent that will sail past a failing
 gate too.
-
-Until invocation passes, do not describe the Ladder as governing Codex. A
-repository-local `AGENTS.md` naming the procedure is the reliable way to reach
-it in the meantime.
 
 ## The invariant
 
