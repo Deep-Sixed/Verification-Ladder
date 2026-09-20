@@ -885,6 +885,10 @@ def shadow_record(repo: Path, declared: dict, results: list[dict], authority: st
         "schema": SCHEMA_V3,
         "shadow": True,
         "authority": authority,
+        # Overridden by `recorded_at` in `extra`: the shadow describes the SAME
+        # execution, so it carries that execution's recording time rather than
+        # taking its own. Two now() calls a few milliseconds apart can straddle a
+        # second boundary, and a clock-dependent identity is not an identity.
         "recorded_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "verifier": verifier_identity(),
         "target_state": target_state,
@@ -1265,7 +1269,7 @@ def command_run(args) -> int:
     emit_shadow(repo, output, lambda: shadow_record(
         repo, declared, results, "local",
         {"repository": repository_identity(repo, exclude)},
-        drift=drift, gate_set=record["gate_set"]))
+        recorded_at=record["recorded_at"], drift=drift, gate_set=record["gate_set"]))
     return EXIT[record["verdict"]]
 
 
@@ -1359,6 +1363,7 @@ def command_import_ci(args) -> int:
     emit_shadow(repo, output, lambda: shadow_record(
         repo, declared, gates, "ci",
         {"repository": {"head": sha, "index_state": None, "worktree_state": clean_state_id(sha)}},
+        recorded_at=record["recorded_at"],
         source={"repository": (run.get("repository") or {}).get("full_name"),
                 "run_id": run.get("id"), "run_attempt": run.get("run_attempt"),
                 "workflow": run.get("path"), "job": job.get("name"),

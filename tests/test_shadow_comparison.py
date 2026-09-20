@@ -154,3 +154,22 @@ def test_the_comparison_never_mixes_authority(repo):
     code, output = run(repo, "compose", str(record), str(repo / ".verification" / "attestations.json"))
     assert "shadow" not in output.lower()
     assert code == 0
+
+
+def test_the_pair_shares_one_recording_time_by_construction(repo):
+    """Not by luck of the clock.
+
+    The two records were once timestamped by separate `datetime.now()` calls a
+    few milliseconds apart, so a run straddling a second boundary produced a pair
+    that could not be shown to describe one execution — NOT COMPARABLE for a
+    reason that had nothing to do with either record's content. CI found it; the
+    shadow now inherits the authoritative record's recording time.
+    """
+    (repo / "verification.toml").write_text(
+        'required_gates = ["slow"]\n\n[gates.local]\n'
+        f'slow = "{sys.executable} -c \\"import time; time.sleep(1.3)\\""\n')
+    record = executed(repo)
+    authoritative = json.loads(record.read_text())
+    derived = json.loads(shadow(repo).read_text())
+    assert authoritative["recorded_at"] == derived["recorded_at"]
+    assert run(repo, "compare", str(record))[0] == 0, "a slow gate must not break the pairing"
