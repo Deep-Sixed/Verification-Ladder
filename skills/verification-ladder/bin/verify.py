@@ -770,6 +770,11 @@ def kind_status(row: dict, governing: dict, judgment_rungs) -> tuple[str, str | 
         return ADMISSIBLE, None
     if name not in governing:
         return INADMISSIBLE, f"{name!r} is not a gate this policy declares"
+    if kind == ATTESTATION and governing[name]["evidence_mode"] == "execution+attestation":
+        # The judgment half of a behavioural gate. Admissible as a row, and
+        # nothing more: `behavioural_status` is what decides whether it binds to
+        # an execution, and the gate is unsatisfied without one either way.
+        return ADMISSIBLE, None
     if kind != EXECUTION:
         return INADMISSIBLE, (f"{name!r} must be established by execution; attested, never executed")
     return ADMISSIBLE, None
@@ -973,7 +978,8 @@ def governance_status(baseline: dict, candidate: dict, rows: list[dict]) -> tupl
     return DEFINITION_PENDING, [f"{name}: candidate definition only" for name in under_candidate] or changed
 
 
-def shadow_gate(repo: Path, result: dict, definitions: dict, target_state: dict) -> dict:
+def shadow_gate(repo: Path, result: dict, definitions: dict, target_state: dict,
+                judgments=()) -> dict:
     """One gate's evidence/3 row, built from the v2 execution that already happened.
 
     From the result, never from a second run. Re-executing to manufacture the v3
@@ -995,11 +1001,16 @@ def shadow_gate(repo: Path, result: dict, definitions: dict, target_state: dict)
                 "target_projection": target_projection(target_state, known["target"])}
         if known["artifacts"] and result["kind"] == EXECUTION:
             row["artifacts"] = gate_artifacts(repo, known)
+    elif name in judgments:
+        # A judgment rung is not a gate and has no gate definition. Saying
+        # "undeclared" here would read as a custom gate sneaking past the policy,
+        # which is a different thing entirely.
+        row["definition"] = "judgment rung"
     else:
         # A gate the policy does not declare - a custom --gate. It gets no
         # definition identity, because it has none: that is the point of §5.
         row["definition"] = "undeclared"
-    for field in ("exit_code", "reason", "step"):
+    for field in ("exit_code", "reason", "step", "note", "at", "execution_ref", "artifact_refs"):
         if field in result:
             row[field] = result[field]
     row["record_id"] = record_id(row)
@@ -1016,7 +1027,8 @@ def shadow_record(repo: Path, declared: dict, results: list[dict], authority: st
     """
     view = shadow_declaration(declared)
     definitions = gate_definitions(repo, view)
-    executed = {result["name"] for result in results}
+    judgments = declared.get("judgment_rungs") or []
+    executed = {result["name"] for result in results if result.get("kind") == EXECUTION}
     return {
         "schema": SCHEMA_V3,
         "shadow": True,
@@ -1025,7 +1037,10 @@ def shadow_record(repo: Path, declared: dict, results: list[dict], authority: st
         # Named rather than dropped: a v3-only declaration does not become
         # executable by being written down, and the comparison has to be able to
         # say that it stayed unpaired rather than quietly covering fewer gates.
-        "unpaired": sorted(name for name in definitions if name not in executed),
+        # Only a record that claims to establish gates has this to answer for; an
+        # agent record holds judgments and establishes none by design.
+        "unpaired": [] if authority == "agent" else sorted(
+            name for name in definitions if name not in executed),
         # Overridden by `recorded_at` in `extra`: the shadow describes the SAME
         # execution, so it carries that execution's recording time rather than
         # taking its own. Two now() calls a few milliseconds apart can straddle a
@@ -1034,9 +1049,29 @@ def shadow_record(repo: Path, declared: dict, results: list[dict], authority: st
         "verifier": verifier_identity(),
         "target_state": target_state,
         "verification_spec": {"policy_sha256": digest_of(declared)},
-        "gates": [shadow_gate(repo, result, definitions, target_state) for result in results],
+        "gates": [shadow_gate(repo, result, definitions, target_state, judgments)
+                  for result in results],
         **extra,
     }
+
+
+def execution_bindings(record_path: Path) -> dict[str, dict]:
+    """What each gate's execution in that record produced, keyed by gate name.
+
+    The one thing a v2 attestation cannot supply is §C's binding: which execution
+    was judged, over which artifacts. It is named - the operator points at the
+    record - rather than discovered by scanning the evidence directory for a
+    plausible execution, which is the pairing mistake `shadow_path_for` exists to
+    make impossible.
+
+    This reads the shadow beside an authoritative record and affects the shadow
+    attestation alone. The authoritative attestation is byte-identical with it
+    and without it.
+    """
+    shadow = load_shadow_record(shadow_path_for(record_path))
+    return {row["gate"]: {"execution_ref": row["record_id"],
+                          "artifact_refs": [a["sha256"] for a in row.get("artifacts") or []]}
+            for row in shadow.get("gates") or [] if row.get("kind") == EXECUTION}
 
 
 def emit_shadow(repo: Path, output: Path | None, build) -> None:
@@ -1149,6 +1184,16 @@ def compare_gate(repo: Path, executed: dict, derived: dict, authority: str, gove
                      executed["kind"], derived["kind"],
                      "an execution read as a judgment, or the reverse, would satisfy the wrong requirement"))
 
+    if name in judgments:
+        # A judgment rung is not a gate. It has no definition and no authority by
+        # design, so those predicates do not apply rather than failing to be
+        # evaluated - reporting NOT COMPARABLE here would say the verifier could
+        # not answer a question nobody asked.
+        rows.append(_row(name, "definition", NOT_APPLICABLE, None, derived.get("definition"),
+                         "a judgment rung is not a gate and carries no gate definition"))
+        rows.append(_row(name, "authority", NOT_APPLICABLE, executed.get("kind"), None,
+                         "a judgment rung is established by the agent that attests it"))
+        return rows
     if name not in governing:
         rows.append(_row(name, "definition", NOT_COMPARABLE, "undeclared", derived.get("definition"),
                          "the policy declares no such gate, so there is no definition to bind to"))
@@ -1192,6 +1237,12 @@ def compare_gate(repo: Path, executed: dict, derived: dict, authority: str, gove
     if governing[name]["evidence_mode"] != "execution+attestation":
         rows.append(_row(name, "artifact chain", NOT_APPLICABLE, None, None,
                          "this gate is an execution alone; no artifacts are judged"))
+    elif derived["kind"] != EXECUTION:
+        # The chain is anchored on the execution: it is the row that produced the
+        # artifacts. A judgment row is one end of it, not something to evaluate
+        # the whole chain against.
+        rows.append(_row(name, "artifact chain", NOT_APPLICABLE, None, None,
+                         "this row is the judgment half; the chain is evaluated from the execution"))
     elif judged is None:
         # The judgment half of a behavioural gate lives in its own record. Saying
         # DISAGREE because nobody handed us that record would report the
@@ -1341,7 +1392,14 @@ def command_compare(args) -> int:
     repo = require_repository(Path(args.repo).resolve())
     record_path = Path(args.path).resolve()
     authoritative = load_record(record_path)
-    comparison = compare_records(repo, record_path, authoritative, policy(repo))
+    judged = None
+    if args.attestations:
+        # Named, so the comparison's scope is the caller's statement rather than
+        # whatever happened to be lying in the evidence directory.
+        judged = [row for row in load_shadow_record(
+            shadow_path_for(Path(args.attestations).resolve())).get("gates") or []
+            if row.get("kind") == ATTESTATION]
+    comparison = compare_records(repo, record_path, authoritative, policy(repo), judged)
     print(f"SHADOW COMPARISON (evidence/3, diagnostic - the task verdict is in {record_path.name})\n")
     if not comparison["paired"]:
         print(f"  NOT COMPARABLE  {comparison['reason']}")
@@ -1542,7 +1600,54 @@ def command_attest(args) -> int:
     record = new_record(repo, "agent", [*kept, attestation], exclude, state=current, verdict=PASS)
     emit(record, output)
     print(f"attested {args.rung} for {current}", file=sys.stderr)
+    # The authoritative record is written and unchanged by everything below.
+    # Nothing is re-run to manufacture the evidence/3 view: it is derived from
+    # the attestation just recorded, plus the binding the caller named.
+    if any((repo / name).exists() for name, _ in POLICY_FILES):
+        emit_shadow(repo, output, lambda: shadow_attestation(
+            repo, record, Path(args.execution).resolve() if args.execution else None,
+            exclude, output))
     return 0
+
+
+def kept_bindings(previous: Path, record: dict) -> dict[str, dict]:
+    """Judgment bindings from the shadow written for this same state, if any."""
+    try:
+        earlier = load_shadow_record(previous)
+    except (SystemExit, OSError):
+        return {}
+    repository = (earlier.get("target_state") or {}).get("repository") or {}
+    if repository.get("worktree_state") != record["repository"]["state_id"]:
+        return {}
+    return {row["gate"]: {k: row[k] for k in ("execution_ref", "artifact_refs") if k in row}
+            for row in earlier.get("gates") or []}
+
+
+def shadow_attestation(repo: Path, record: dict, execution: Path | None,
+                       exclude: frozenset[str], record_path: Path) -> dict:
+    """The evidence/3 view of an attestation that has already been recorded.
+
+    An attestation has no execution and this must not pretend it has one. Every
+    row here is a judgment; what the binding adds is a reference to an execution
+    someone else recorded, and a row whose gate that execution never covered
+    simply carries no binding rather than an invented one.
+    """
+    declared = policy(repo)
+    bindings = execution_bindings(execution) if execution else {}
+    if execution and not bindings:
+        print(f"  shadow   {execution.name} records no execution to bind a judgment to",
+              file=sys.stderr)
+    # Attesting a second rung rewrites the whole record, and the shadow is built
+    # from that record - so a binding named on an earlier call would be silently
+    # dropped by the next `attest` unless it is carried forward, exactly as the
+    # authoritative rows are. Only while the target still matches: a binding that
+    # survived a state move would be laundering the judgment across it.
+    carried = kept_bindings(shadow_path_for(record_path), record)
+    rows = [{**gate, **carried.get(gate["name"], {}), **bindings.get(gate["name"], {})}
+            for gate in record["gates"]]
+    return shadow_record(repo, declared, rows, "agent",
+                         shadow_target(repo, declared, repository_identity(repo, exclude)),
+                         recorded_at=record["recorded_at"])
 
 
 def command_import_ci(args) -> int:
@@ -1781,6 +1886,9 @@ def main(argv: list[str] | None = None) -> int:
     attester = sub.add_parser("attest", help="record a judgment rung the machine cannot execute")
     attester.add_argument("--rung", required=True, help="the ladder rung being attested")
     attester.add_argument("--note", required=True, help="what was examined, in one line")
+    attester.add_argument("--execution", metavar="RECORD",
+                          help="the evidence record holding the execution this judgment is over; "
+                               "affects the evidence/3 shadow only, never the attestation itself")
     attester.add_argument("--output", help="attestation record (default: .verification/attestations.json)")
     attester.set_defaults(handler=command_attest)
 
@@ -1799,6 +1907,9 @@ def main(argv: list[str] | None = None) -> int:
     comparer = sub.add_parser(
         "compare", help="diagnostic: how the evidence/3 reading of an execution differs from it")
     comparer.add_argument("path", help="the authoritative evidence/2 record to compare against")
+    comparer.add_argument("--attestations", metavar="RECORD",
+                          help="attestation record to bring into scope, for gates whose judgment "
+                               "half lives in one")
     comparer.set_defaults(handler=command_compare)
 
     checker = sub.add_parser("check", help="re-bind a record to the current state")
