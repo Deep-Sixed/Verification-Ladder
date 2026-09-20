@@ -25,19 +25,28 @@ A linked skill is available in every repository, and `git pull` in the clone
 updates every agent at once. The skill's own directory is reported to the agent
 when the skill loads, which is how it finds `bin/verify.py`.
 
-## Codex
+## Codex — not yet verified
 
-Codex discovers skills from its skills directory the same way. Link the same
-directory — never a second copy:
+**This section is untested.** The Claude Code path above was checked against a
+running installation; the Codex equivalent has not been. Do not treat "both
+agents use the same installed skill" as established until you have confirmed it
+on your own Codex environment.
+
+The requirement is only that Codex resolves to *this* directory rather than to a
+copy. If Codex reads a skills directory the way Claude Code does, a link is
+enough:
 
 ```sh
 mkdir -p ~/.codex/skills
 ln -s ~/src/verification-ladder/skills/verification-ladder ~/.codex/skills/verification-ladder
 ```
 
-Verify the path against your Codex version's documentation; if it differs, link
-into whatever directory it reads. The requirement is only that both agents
-resolve to this one directory.
+Check that path against your Codex version's documentation before relying on it,
+and confirm the skill actually loads — ask Codex to read the Ladder and report
+the rung count, or run a task in a repository with no `verification.toml` and
+check that it stops at BLOCKED rather than reporting success. Until that check
+passes, a repository-local `AGENTS.md` naming the procedure is the reliable way
+to reach Codex.
 
 ## The invariant
 

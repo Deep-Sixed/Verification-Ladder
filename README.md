@@ -85,7 +85,9 @@ Changing what "complete" means is then a reviewed change to that project.
 **A repository with no policy is BLOCKED, not verified.** Silence is not
 consent; an unconfigured project must never read as a passing one.
 
-See [INSTALL.md](INSTALL.md) to install it and onboard a repository.
+See [INSTALL.md](INSTALL.md) to install it and onboard a repository. The Claude
+Code install path is verified; the Codex one is written but not yet tested, and
+is marked as such rather than claimed.
 
 ## Status
 
