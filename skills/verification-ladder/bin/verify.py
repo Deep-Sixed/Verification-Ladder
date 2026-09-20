@@ -1038,9 +1038,12 @@ def shadow_gate(repo: Path, result: dict, definitions: dict, target_state: dict,
         # about a repository state, and must expire with it.
         row |= {"definition": "judgment rung", "target": ["repository"],
                 "target_projection": target_projection(target_state, ["repository"])}
-    elif known and known["invocations"].get(authority) != invoked:
+    elif known and result["kind"] == EXECUTION and known["invocations"].get(authority) != invoked:
         # The name is declared; what ran is not what the declaration says. The
         # row gets no definition identity, because it was produced under none.
+        # Executions only: a judgment is not an invocation, and comparing one
+        # against a declared command would refuse every attestation by accident
+        # rather than on purpose.
         row |= {"definition": "undeclared", "executed_as": invoked}
     elif known:
         row |= {"definition_sha256": known["definition_sha256"],

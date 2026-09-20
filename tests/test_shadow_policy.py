@@ -337,3 +337,16 @@ def test_the_shadow_layer_changes_nothing_about_the_authoritative_result(repo):
     without_layer = outcome("without")
     assert with_layer == without_layer, (
         "the [shadow] layer altered the authoritative result it has no authority over")
+
+
+def test_a_judgment_row_is_not_measured_against_a_declared_invocation(repo):
+    """An attestation runs no command; asking which one it ran refuses all of them."""
+    executed(repo)
+    code, output = cli(repo, "attest", "--rung", "verify-login", "--note", "watched it",
+                       "--execution", str(record(repo)))
+    assert code == 0, output
+    shadow = json.loads((repo / ".verification" / "shadow" / "attestations.v3.json").read_text())
+    row = shadow["gates"][0]
+    assert row["kind"] == "attestation"
+    assert row.get("definition_sha256"), "the judgment half keeps the gate's declared identity"
+    assert "executed_as" not in row
