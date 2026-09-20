@@ -41,12 +41,34 @@ mkdir -p ~/.codex/skills
 ln -s ~/src/verification-ladder/skills/verification-ladder ~/.codex/skills/verification-ladder
 ```
 
-Check that path against your Codex version's documentation before relying on it,
-and confirm the skill actually loads — ask Codex to read the Ladder and report
-the rung count, or run a task in a repository with no `verification.toml` and
-check that it stops at BLOCKED rather than reporting success. Until that check
-passes, a repository-local `AGENTS.md` naming the procedure is the reliable way
-to reach Codex.
+Check that path against your Codex version's documentation before relying on it.
+Then run two different tests, because they establish different things and only
+one of them is decisive.
+
+**Discovery** — can the agent find and read the skill?
+
+> Ask Codex to read the Verification Ladder skill and report how many rungs it
+> has. The answer is nine.
+
+A correct answer proves the files are reachable. It proves nothing about whether
+they will be used.
+
+**Invocation** — does the agent actually climb the ladder during ordinary work?
+
+> In a repository with **no** `verification.toml`, give Codex a task that
+> modifies repository state. It should stop at BLOCKED and say the project has
+> no verification policy. If it reports the work complete, the integration has
+> failed — whatever it answered about rung counts.
+
+The negative case is what makes this test worth running: an unconfigured
+repository is the one situation where a silent bypass is invisible in the
+output, because there is nothing to compare against and the work may well look
+finished. An agent that sails past it is an agent that will sail past a failing
+gate too.
+
+Until invocation passes, do not describe the Ladder as governing Codex. A
+repository-local `AGENTS.md` naming the procedure is the reliable way to reach
+it in the meantime.
 
 ## The invariant
 
