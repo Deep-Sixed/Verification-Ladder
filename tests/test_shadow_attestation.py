@@ -265,3 +265,12 @@ def test_an_artifact_change_does_not_alter_the_authoritative_record(repo):
     now = cli(repo, "compose", str(local(repo)), str(judgments(repo)))
     assert now == was, "a qualification failure rewrote the authoritative composite"
     assert (local(repo).read_bytes(), judgments(repo).read_bytes()) == before
+
+
+def test_the_first_attestation_of_a_task_reports_nothing_alarming(repo):
+    """There is no earlier shadow to carry bindings from, and that is ordinary."""
+    ran(repo)
+    code, output = cli(repo, "attest", "--rung", "diff", "--note", "read every hunk")
+    assert code == 0
+    assert "unreadable" not in output and "FileNotFoundError" not in output, output
+    assert "shadow " in output, "the shadow is still written; only the false alarm is gone"

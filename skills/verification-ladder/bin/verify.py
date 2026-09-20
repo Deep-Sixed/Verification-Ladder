@@ -1910,6 +1910,11 @@ def command_attest(args) -> int:
 
 def kept_bindings(previous: Path, record: dict) -> dict[str, dict]:
     """Judgment bindings from the shadow written for this same state, if any."""
+    if not previous.exists():
+        # The first attestation of a task has no earlier shadow, which is
+        # ordinary. Letting the reader refuse it would print a file-not-found at
+        # every honest first judgment.
+        return {}
     try:
         earlier = load_shadow_record(previous)
     except (SystemExit, OSError):
