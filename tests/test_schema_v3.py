@@ -103,6 +103,18 @@ def test_a_specification_outside_its_root_is_refused(repo):
     assert raised.value.code == 2
 
 
+def test_spec_root_itself_cannot_escape_the_repository(repo):
+    external = repo.parent / "shared-specs"
+    external.mkdir()
+    (external / "sign-in.md").write_text("not project owned\n")
+    gate = {"target": ["repository"], "evidence_mode": "execution+attestation",
+            "authorities": {"local": {"driver": "drive.mjs"}},
+            "spec_root": "../shared-specs", "spec_files": ["../shared-specs/sign-in.md"]}
+    with pytest.raises(SystemExit) as raised:
+        verify.spec_sources(repo, "verify-login", gate)
+    assert raised.value.code == 2
+
+
 def test_spec_files_without_a_root_are_refused(repo):
     gate = {"target": ["repository"], "evidence_mode": "execution",
             "authorities": {"local": {"driver": "d"}}, "spec_files": ["verification/features/sign-in.md"]}

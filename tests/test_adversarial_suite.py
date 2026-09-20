@@ -12,6 +12,7 @@ are collected at the end, named and skipped rather than silently absent.
 import hashlib
 import importlib.util
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -266,12 +267,24 @@ def test_a_clean_result_while_a_tracked_finding_remains_open():
     raise AssertionError
 
 
-@pytest.mark.skip(reason="blocked on evidence/3 activation; the CLI still emits evidence/2")
-def test_the_cli_refuses_to_report_ready_when_no_gate_actually_ran():
-    """Still blocked, and checked rather than assumed. The evidence/3 path now
-    refuses every leg of the replay through the shadow surfaces, but v2 remains
-    authoritative and still reports READY FOR HUMAN GATE TRUE for it -
-    tests/test_shadow_qualification.py::test_the_v2_composer_still_accepts_the_forgery
-    runs that and will start failing at M4, which is when this can be written.
+def test_the_cli_refuses_to_report_ready_when_no_gate_actually_ran(tmp_path):
+    """The M4 authority switch resolves the activation blocker.
+
+    The old v2 replay is still documented in
+    test_shadow_qualification.py::test_the_v2_composer_still_accepts_the_forgery.
+    After activation, those same records cannot reach READY FOR HUMAN GATE.
     """
-    raise AssertionError
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import test_m4_activation as m4
+
+    checkout = m4.make_repo(tmp_path)
+    m4.activate(checkout)
+    assert m4.cli(checkout, "run", "--gate", "unit=true", "--gate", "verify-login=true",
+                  "--output", str(m4.evidence(checkout, "local-v3")))[0] == 0
+    assert m4.cli(checkout, "attest", "--rung", "diff", "--note", "did not read it",
+                  "--output", str(m4.evidence(checkout, "attest-v3")))[0] == 0
+    code, output = m4.cli(checkout, "compose", str(m4.evidence(checkout, "local-v3")),
+                          str(m4.evidence(checkout, "attest-v3")))
+    assert code == 1
+    assert "no admissible execution evidence" in output
+    assert "READY FOR HUMAN GATE     FALSE" in output

@@ -1,13 +1,13 @@
 # Evidence v3 — admissibility as a single invariant
 
-**Status: the model is implemented and is not authoritative.** This note fixed
-the shape of `verification.ladder.evidence/3` so the enforcement work could be
-written against a settled schema rather than discovering one. Items 1-14 of the
-series below have landed. Records on disk are still `evidence/2`, `compose`
-still applies v2 rules, and every verdict and exit code the CLI produces is
-still v2's; evidence/3 is emitted beside them, read by `compare` and `qualify`,
-and decides nothing. §M4 — the authority switch — has not happened and is its
-own review point.
+**Status: the model is implemented and activatable.** This note fixed the shape
+of `verification.ladder.evidence/3` so the enforcement work could be written
+against a settled schema rather than discovering one. Items 1-15 of the series
+below have landed. Before activation, records on disk are still `evidence/2`
+with evidence/3 emitted beside them for `compare` and `qualify`. After
+`verify.py activate` writes the local authority declaration, new evidence is
+`verification.ladder.evidence/3` and `compose` applies the v3 admissibility
+rules as the authoritative predicate.
 
 ## The problem
 
@@ -820,18 +820,17 @@ condition this stage exists to end.
 ### M4. The authority switch
 
 Only after M3 may evidence/3 become authoritative, and that change is its own
-commit and its own review point — never a side effect of a stage that precedes
-it, and never reached by implication because the preceding work looked
-finished.
+review point — never a side effect of a stage that precedes it, and never
+reached by implication because the preceding work looked finished.
 
-`VERSION` moves to `0.2.0` at that commit and not before (§J): the package
-version should mean that evidence/3 is emitted and enforced, which is a claim
-worth keeping accurate while the model is dormant behind a v2 CLI.
+`VERSION` moves to `0.2.0` at the authority switch and not before (§J): the
+package version means that evidence/3 is emitted and enforced after activation.
 
 ### Invariants that hold across all four stages
 
 - The CLI emits `verification.ladder.evidence/2` and composes under v2 rules
-  until M4. Items 1-11 are complete and none of them changed that.
+  until activation. After `.verification/authority.json` declares evidence/3
+  authority, newly produced records are `verification.ladder.evidence/3`.
 - A behavioural gate gains CI authority only where the policy declares CI for
   it — `[gates.ci.<name>]`, or `[shadow.gates.ci.<name>]` in the shadow layer.
   It is never inferred from the gate being behavioural.
@@ -839,7 +838,8 @@ worth keeping accurate while the model is dormant behind a v2 CLI.
   command, never satisfies a requirement, and never alters a v2 record, verdict
   or exit code. v3 syntax in the authoritative `[gates.*]` namespace is still
   refused.
-- `VERSION` stays `0.1.0` until M4.
+- `VERSION` stayed `0.1.0` until M4 and is `0.2.0` once evidence/3 authority is
+  available.
 - §L5's migration baseline stays pinned at `202bf35`. Later commits in the
   migration task do not move the anchor; that is what naming an immutable one
   was for.
@@ -1269,9 +1269,8 @@ the general rule.
 
 ## Implementation series
 
-Written before any of it began, and kept as written. Items 1-14 have landed;
-item 15 is §M4 and has not. No authoritative evidence behaviour changed in any
-of items 1-14.
+Written before any of it began, and kept as a trace of the migration. Items
+1-15 have landed. Authoritative evidence behaviour changes only at item 15.
 
 1. **Schema-v3 data model**, parsing and validation — including legacy v2
    policy normalization and the migration baseline (§L5, §L6).
@@ -1310,8 +1309,9 @@ last of which is its own review point:
        comparable, uncovered prerequisite — and item 11's adversarial cases
        driven through the shadow surfaces rather than against the predicates.
     A green suite is not qualification.
-15. **Authority switch** (§M4) — evidence/3 becomes authoritative, `VERSION`
-    moves to `0.2.0`, in a commit of its own.
+15. **Authority switch** (§M4) — evidence/3 becomes authoritative after
+    `activate`, `VERSION` moves to `0.2.0`, and v2 evidence becomes migration
+    diagnostic input only.
 
 ## Adversarial acceptance tests
 

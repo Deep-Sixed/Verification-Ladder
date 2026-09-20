@@ -101,12 +101,13 @@ The evidence model is being revised. [`docs/design/evidence-v3.md`](docs/design/
 its definition, permitted authority, execution provenance, target state, proof
 artifacts and verifier identity all refer to the same thing.
 
-**The model is implemented; it is not authoritative.** Records on disk are
-`evidence/2`, `compose` applies v2 rules, and every verdict and exit code the
-CLI produces is v2's. Beside each authoritative record the CLI writes an
-evidence/3 shadow, and `compare` and `qualify` report how the v3 reading of the
-same execution differs from it. A disagreement there is a finding about the
-verifier, never about the change. Activation is staged (§M) and the switch is
-its own review point.
+**The model is implemented and activatable.** Before activation, records on disk
+are `evidence/2`; beside each one the CLI writes an evidence/3 shadow, and
+`compare` and `qualify` report how the v3 reading differs without changing the
+v2 verdict. After `verify.py activate` writes `.verification/authority.json`,
+new `run`, `attest`, and `import-ci` records are `evidence/3`, and `compose`
+applies the v3 admissibility rules as the authoritative predicate. Existing
+`evidence/2` records remain readable for migration diagnostics, but cannot
+satisfy activated v3 requirements.
 
 MIT licensed; see `LICENSE`.

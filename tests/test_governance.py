@@ -55,6 +55,14 @@ def test_a_weakened_policy_is_a_governance_change_not_a_clean_climb(repo, baseli
     assert findings == ["lint: candidate definition only"]
 
 
+def test_a_weakened_completion_contract_is_a_governance_change(repo, baseline):
+    candidate = verify.gate_definitions(repo, STRICT)
+    weakened = {**STRICT, "required_gates": ["lint"], "judgment_rungs": []}
+    state, findings = verify.governance_status(baseline, candidate, _rows(candidate, "lint", "tests"), weakened)
+    assert state == verify.DEFINITION_PENDING
+    assert findings == ["completion contract changed"]
+
+
 def test_an_unrelated_gate_is_not_dragged_into_the_change(repo, baseline):
     candidate = verify.gate_definitions(repo, WEAKENED)
     _, changed = verify.definition_change(baseline, candidate)

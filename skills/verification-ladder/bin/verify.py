@@ -16,13 +16,13 @@ commands that satisfy it, come from that repository's own committed policy.
     python scripts/verify.py baseline [--origin captured|reconstructed]
     python scripts/verify.py compare PATH [--attestations PATH]
     python scripts/verify.py qualify PATH... [--output PATH]
+    python scripts/verify.py activate PATH... [--output PATH]
 
-The last three belong to the staged evidence/3 activation in
-`docs/design/evidence-v3.md` §M. They decide nothing: `baseline` records what
-the gates mean before a task changes them, `compare` reports how the evidence/3
-reading of an execution differs from the execution, and `qualify` reports
-whether this evidence set exercised everything evidence/3 would enforce. None of
-them touches a verdict, an exit code or a composite.
+The last four are the evidence/3 activation path in `docs/design/evidence-v3.md`
+§M. `baseline`, `compare` and `qualify` are diagnostic until `activate` writes
+the local authority declaration. After activation, `run`, `attest` and
+`import-ci` emit `verification.ladder.evidence/3` directly, and `compose` uses
+the evidence/3 admissibility rules as the authoritative predicate.
 
 A gate result is evidence for one repository state and nothing else, so every
 record carries a state id taken over HEAD plus the working tree. `check` refuses
@@ -47,18 +47,17 @@ from pathlib import Path
 
 SCHEMA = "verification.ladder.evidence/2"
 COMPOSITE = "verification.ladder.composite/2"
-# The schema the model below describes. Nothing emits it yet: this is the data
-# model, its parsing and its validation, landed ahead of the rules that will use
-# it so the enforcement work is written against a settled shape. Records on disk
-# are still evidence/2 until those rules land, because a record stamped v3 while
-# the composer applies v2 semantics would be worse than either.
+# The activated evidence schema. Before `activate`, commands still emit v2 plus
+# a shadow v3 record so repositories can qualify the v3 path. After activation,
+# commands emit this schema directly and the composer applies v3 semantics.
 SCHEMA_V3 = "verification.ladder.evidence/3"
 BASELINE_SCHEMA = "verification.ladder.baseline/1"
+AUTHORITY_SCHEMA = "verification.ladder.authority/1"
 # Provenance says which build produced a record; the contract says which records
 # may compose. They are separate: a verifier can keep the v3 record shape and
 # change what admissible means, and that must invalidate earlier evidence.
 COMPATIBILITY = "evidence-v3.1"
-VERSION = "0.1.0"  # tracks pyproject's version; tests/test_schema_v3.py holds them equal
+VERSION = "0.2.0"  # tracks pyproject's version; tests/test_schema_v3.py holds them equal
 # A gate declares the target dimensions it depends on. Evidence must carry every
 # dimension its gate declares, and dimensions it does not declare are never
 # compared - so a moved runtime expires a behavioural gate while a lint gate,
@@ -91,9 +90,9 @@ AGREE, DISAGREE, NOT_COMPARABLE, NOT_APPLICABLE = "AGREE", "DISAGREE", "NOT COMP
 # the one that matters: a predicate nobody evaluated reads exactly like one that
 # passed unless the report keeps them apart.
 QUALIFIED, DISAGREEMENT, UNCOVERED = "QUALIFIED", "DISAGREEMENT", "UNCOVERED"
-# What M4 would switch authority over, and the predicate that carries each. M4
-# may take authority only over semantics this list has seen exercised; anything
-# first exercised at M4 is not qualified.
+# What M4 switches authority over, and the predicate that carries each. M4 may
+# take authority only over semantics this list has seen exercised; anything first
+# exercised at M4 is not qualified.
 M4_CONTRACT = (
     ("outcome", "the evidence/3 reading of a gate result is the executed one"),
     ("kind", "execution and judgment stay distinct"),
@@ -322,10 +321,11 @@ def refuse_inactive_v3(declared: dict, config: Path) -> None:
                 found.add(f"[gates.local.{name}]")
     if found:
         raise blocked(
-            f"{config}: {', '.join(sorted(found))} is {SCHEMA_V3} policy syntax, which this release "
-            f"parses but does not act on - evidence/3 is implemented and not yet authoritative (see "
-            f"docs/design/evidence-v3.md). Declare gates in the form this release reads: "
-            f'[gates.local] name = "command", and [ci_steps] name = "step" for gates only CI can run.'
+            f"{config}: {', '.join(sorted(found))} is {SCHEMA_V3} policy syntax for the authoritative "
+            f"gate namespace. This release activates evidence/3 through the staged [shadow] policy view "
+            f"documented in docs/design/evidence-v3.md. Declare executable gates in the legacy form this "
+            f"release runs: [gates.local] name = \"command\", and [ci_steps] name = \"step\" for gates "
+            f"only CI can run."
         )
 
 
@@ -382,6 +382,9 @@ def shadow_declaration(declared: dict) -> dict:
                   for name in overlay[block]}
 
     view: dict = {"gates": {}}
+    for key in ("required_gates", "judgment_rungs", "ci_head_events"):
+        if key in declared:
+            view[key] = declared[key]
     base = declared.get("gates")
     authoritative = ((base.get("local") if isinstance(base, dict) else None) or {},
                      declared.get("ci_steps") or {})
@@ -562,7 +565,10 @@ def spec_sources(repo: Path, name: str, gate: dict) -> list[dict]:
     root_name = gate.get("spec_root")
     if not isinstance(root_name, str) or not root_name:
         raise _declaration_error(name, "declares spec_files without a spec_root to bound them")
+    repository_root = repo.resolve()
     root = (repo / root_name).resolve()
+    if not root.is_relative_to(repository_root):
+        raise _declaration_error(name, f"spec_root {root_name!r} resolves outside the repository")
     sources = []
     for entry in sorted(files):
         if not isinstance(entry, str):
@@ -649,8 +655,18 @@ def baseline_record(repo: Path, declared: dict, gates: list[dict], *, origin: st
         "verifier": verifier_identity(),
         "target_state": {"repository": repository_identity(repo, exclude)},
         "governing": {"policy_sha256": digest_of(declared),
+                      "completion_contract_sha256": digest_of(completion_contract(declared)),
                       "gates": gate_definitions(repo, declared)},
         "gates": gates,
+    }
+
+
+def completion_contract(declared: dict) -> dict:
+    """The policy-level contract that decides whether a set of rows is complete."""
+    return {
+        "required_gates": list(declared.get("required_gates") or []),
+        "judgment_rungs": list(declared.get("judgment_rungs") or []),
+        "ci_head_events": list(declared.get("ci_head_events") or ["push"]),
     }
 
 
@@ -907,7 +923,9 @@ def ci_provenance_status(run: dict, job: dict, expected: dict) -> tuple[str, str
         return INADMISSIBLE, (f"job belongs to run {job['run_id']}, the metadata is from run "
                               f"{run['id']}; a job from another run establishes nothing here")
     attempts = (run.get("run_attempt"), job.get("run_attempt"))
-    if all(a is not None for a in attempts) and attempts[0] != attempts[1]:
+    if any(a is None for a in attempts):
+        return INADMISSIBLE, "cannot bind job to run attempt: one of them carries no run_attempt"
+    if attempts[0] != attempts[1]:
         return INADMISSIBLE, (f"job is from attempt {attempts[1]}, the run metadata is attempt "
                               f"{attempts[0]}")
     if job.get("head_sha") and job["head_sha"] != sha:
@@ -996,7 +1014,18 @@ def definition_change(baseline: dict, candidate: dict) -> tuple[str, list[str]]:
     return (DEFINITION_PENDING if changed else DEFINITION_UNCHANGED), sorted(changed)
 
 
-def governance_status(baseline: dict, candidate: dict, rows: list[dict]) -> tuple[str, list[str]]:
+def completion_contract_change(baseline: dict, declared: dict) -> list[str]:
+    """Policy-level completion semantics that are not part of any one gate digest."""
+    governing = baseline.get("governing") or {}
+    captured = governing.get("completion_contract_sha256")
+    candidate = digest_of(completion_contract(declared))
+    if captured == candidate:
+        return []
+    return ["completion contract changed"]
+
+
+def governance_status(baseline: dict, candidate: dict, rows: list[dict],
+                      declared: dict | None = None) -> tuple[str, list[str]]:
     """Whether this task may report a clean climb, or is a governance change.
 
     A task that changes what a gate means may collect evidence under the new
@@ -1006,6 +1035,9 @@ def governance_status(baseline: dict, candidate: dict, rows: list[dict]) -> tupl
     governing, and only then for subsequent tasks.
     """
     state, changed = definition_change(baseline, candidate)
+    if declared is not None:
+        changed = [*changed, *completion_contract_change(baseline, declared)]
+        state = DEFINITION_PENDING if changed else DEFINITION_UNCHANGED
     if state == DEFINITION_UNCHANGED:
         return DEFINITION_UNCHANGED, []
     governing = governing_definitions(baseline)
@@ -1114,7 +1146,11 @@ def execution_bindings(record_path: Path) -> dict[str, dict]:
     attestation alone. The authoritative attestation is byte-identical with it
     and without it.
     """
-    shadow = load_shadow_record(shadow_path_for(record_path))
+    raw = load_json(record_path)
+    if raw.get("schema") == SCHEMA_V3 and not raw.get("shadow"):
+        shadow = raw
+    else:
+        shadow = load_shadow_record(shadow_path_for(record_path))
     return {row["gate"]: {"execution_ref": row["record_id"],
                           "artifact_refs": [a["sha256"] for a in row.get("artifacts") or []]}
             for row in shadow.get("gates") or [] if row.get("kind") == EXECUTION}
@@ -1156,7 +1192,7 @@ def load_shadow_record(path: Path) -> dict:
     if record.get("schema") != SCHEMA_V3:
         raise blocked(f"{path}: not a {SCHEMA_V3} record")
     if not record.get("shadow"):
-        raise blocked(f"{path}: not a shadow record; evidence/3 is not authoritative (see §M)")
+        raise blocked(f"{path}: not a shadow record; this reader expects the M1-M3 diagnostic copy")
     return record
 
 
@@ -1241,7 +1277,7 @@ def baseline_applies(repo: Path, baseline: dict) -> tuple[bool, str | None]:
     return True, None
 
 
-def governance_rows(repo: Path, record_path: Path, candidate: dict,
+def governance_rows(repo: Path, record_path: Path, declared: dict, candidate: dict,
                     rows: list[dict]) -> tuple[dict | None, list[dict]]:
     """Whether every gate still means what it meant when this task started.
 
@@ -1264,7 +1300,7 @@ def governance_rows(repo: Path, record_path: Path, candidate: dict,
     applies, why = baseline_applies(repo, baseline)
     if not applies:
         return None, [_row("-", "governance", NOT_COMPARABLE, None, baseline.get("origin"), why)]
-    state, findings = governance_status(baseline, candidate, rows)
+    state, findings = governance_status(baseline, candidate, rows, declared)
     label = "governance" if state == DEFINITION_UNCHANGED else "governance (DEFINITION CHANGE PENDING)"
     return baseline, [_row("-", label, AGREE, baseline.get("origin"), state,
                            "; ".join(findings) or "every gate means what it meant at baseline")]
@@ -1476,7 +1512,8 @@ def compare_records(repo: Path, record_path: Path, authoritative: dict, declared
     rows.append(_row("-", "verifier contract", AGREE if status == ADMISSIBLE else DISAGREE,
                      COMPATIBILITY, (shadow.get("verifier") or {}).get("compatibility"),
                      why or "records compose only under one set of admissibility rules"))
-    baseline, governance = governance_rows(repo, record_path, governing, shadow["gates"])
+    baseline, governance = governance_rows(repo, record_path, shadow_declaration(declared),
+                                           governing, shadow["gates"])
     rows.extend(governance)
     if baseline is not None:
         # The definitions in force are the ones captured before the change, not
@@ -1523,7 +1560,7 @@ def compare_ci_source(shadow: dict, authoritative: dict, declared: dict, governi
     run = {"id": source.get("run_id"), "head_sha": source.get("head_sha"), "event": source.get("event"),
            "run_attempt": source.get("run_attempt"), "path": source.get("workflow"),
            "repository": {"full_name": source.get("repository")}}
-    job = {"run_id": source.get("job_run_id"), "run_attempt": source.get("run_attempt"),
+    job = {"run_id": source.get("job_run_id"), "run_attempt": source.get("job_run_attempt", source.get("run_attempt")),
            "head_sha": source.get("head_sha"), "name": source.get("job"),
            "steps": source.get("steps") or []}
     status, why = ci_provenance_status(run, job, expected)
@@ -1548,6 +1585,264 @@ def compare_ci_source(shadow: dict, authoritative: dict, declared: dict, governi
                           f"step {step!r}")
                          or f"step {step!r} concluded what the authoritative record says it did"))
     return rows
+
+
+def activation_rows(repo: Path, declared: dict, paths: list[Path],
+                    records: list[dict]) -> tuple[list[dict], list[tuple[Path, str]], list[dict]]:
+    judged = []
+    for path, record in zip(paths, records, strict=True):
+        if record.get("authority") != "agent":
+            continue
+        try:
+            judged += [row for row in load_shadow_record(shadow_path_for(path)).get("gates") or []
+                       if row.get("kind") == ATTESTATION]
+        except SystemExit:
+            pass
+
+    rows, unpaired, shadows = [], [], []
+    for path, record in zip(paths, records, strict=True):
+        comparison = compare_records(repo, path, record, declared, judged or None)
+        if comparison["paired"]:
+            rows.extend(comparison["rows"])
+            shadows.append(comparison["shadow"])
+        else:
+            unpaired.append((path, comparison["reason"]))
+    return rows, unpaired, shadows
+
+
+def activation_findings(repo: Path, declared: dict, paths: list[Path],
+                        records: list[dict]) -> tuple[list[str], list[dict], list[dict]]:
+    rows, unpaired, shadows = activation_rows(repo, declared, paths, records)
+    summary = qualification(rows)
+    findings = [f"{path.name}: {reason}" for path, reason in unpaired]
+    for entry in summary:
+        if entry["state"] != QUALIFIED:
+            findings.append(f"{entry['predicate']}: {entry['state']}")
+
+    declared_view = shadow_declaration(declared)
+    required = set(declared_view.get("required_gates") or [])
+    judgments = set(declared_view.get("judgment_rungs") or [])
+    execution_seen = {row["gate"] for shadow in shadows for row in shadow.get("gates") or []
+                      if row.get("kind") == EXECUTION}
+    judgment_seen = {row["gate"] for shadow in shadows for row in shadow.get("gates") or []
+                     if row.get("kind") == ATTESTATION}
+    for gate in sorted(required - execution_seen):
+        findings.append(f"{gate}: UNCOVERED")
+    for rung in sorted(judgments - judgment_seen):
+        findings.append(f"{rung}: UNCOVERED")
+
+    for row in rows:
+        if row["predicate"].startswith("governance") and row["v3_derived"] == DEFINITION_PENDING:
+            findings.append("DEFINITION CHANGE PENDING")
+    return findings, summary, shadows
+
+
+def command_activate(args) -> int:
+    """Switch this repository to evidence/3 authority after the qualified path proves itself."""
+    repo = require_repository(Path(args.repo).resolve())
+    declared = policy(repo)
+    paths = [Path(p).resolve() for p in args.paths]
+    records = [load_record(path) for path in paths]
+    findings, summary, _ = activation_findings(repo, declared, paths, records)
+    baseline = baseline_path_for(paths[0])
+    if not baseline.exists():
+        findings.insert(0, "GOVERNING BASELINE MISSING")
+    else:
+        try:
+            record = load_baseline(baseline)
+            applies, why = baseline_applies(repo, record)
+            if not applies:
+                findings.insert(0, f"GOVERNING BASELINE MISSING: {why}")
+        except SystemExit:
+            findings.insert(0, "GOVERNING BASELINE MISSING: baseline record is unreadable")
+
+    print("M4 ACTIVATION (evidence/3 authority precondition)\n")
+    for entry in summary:
+        print(f"  {entry['state']:<15} {entry['predicate']}")
+    print("\n  " + "-" * 62)
+    if findings:
+        print("  AUTHORITY SWITCH        FALSE")
+        for finding in findings:
+            print(f"    - {finding}")
+        return EXIT[BLOCKED]
+
+    output = Path(args.output).resolve() if args.output else authority_path(repo)
+    record = {
+        "schema": AUTHORITY_SCHEMA,
+        "authority": SCHEMA_V3,
+        "activated_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "verifier": verifier_identity(),
+        "baseline": baseline.relative_to(repo).as_posix() if baseline.is_relative_to(repo) else str(baseline),
+        "records": [path.relative_to(repo).as_posix() if path.is_relative_to(repo) else str(path)
+                    for path in paths],
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    temporary.write_text(json.dumps(record, indent=2) + "\n")
+    temporary.replace(output)
+    print("  AUTHORITY SWITCH        TRUE")
+    print(f"  declaration             {output}")
+    return EXIT[PASS]
+
+
+def v3_current_target(repo: Path, declared: dict, exclude: frozenset[str]) -> dict:
+    return shadow_target(repo, declared, repository_identity(repo, exclude))
+
+
+def ci_status_for_v3(record: dict, declared: dict, repository: dict) -> list[str]:
+    if record.get("authority") != "ci":
+        return []
+    source = record.get("source") or {}
+    expect = (declared.get(SHADOW_POLICY) or {}).get("ci") or {}
+    expected = {"head_sha": repository.get("head"), "repository": expect.get("repository"),
+                "workflow": expect.get("workflow"), "job": expect.get("job"),
+                "events": declared.get("ci_head_events") or ["push"]}
+    run = {"id": source.get("run_id"), "head_sha": source.get("head_sha"), "event": source.get("event"),
+           "run_attempt": source.get("run_attempt"), "path": source.get("workflow"),
+           "repository": {"full_name": source.get("repository")}}
+    job = {"run_id": source.get("job_run_id"), "run_attempt": source.get("job_run_attempt", source.get("run_attempt")),
+           "head_sha": source.get("head_sha"), "name": source.get("job"), "steps": source.get("steps") or []}
+    status, reason = ci_provenance_status(run, job, expected)
+    findings = [] if status == ADMISSIBLE else [reason]
+    for row in record.get("gates") or []:
+        step = row.get("step")
+        if step is None:
+            continue
+        status, reason = ci_step_status(job, step)
+        if status != row.get("status"):
+            findings.append(reason or f"{row['gate']}: CI step conclusion does not match the recorded status")
+    return findings
+
+
+def command_compose_v3(args) -> int:
+    repo = require_repository(Path(args.repo).resolve())
+    paths = [Path(p).resolve() for p in args.paths]
+    output = Path(args.output).resolve() if args.output else None
+    exclude = relative_inside(repo, [*paths, output])
+    raw_records = [load_json(path) for path in paths]
+    schemas = {record.get("schema") for record in raw_records}
+    if SCHEMA in schemas:
+        raise blocked(
+            "evidence/3 is authoritative for this repository; evidence/2 records are migration "
+            "diagnostics only and cannot satisfy v3 gates. Re-run `verify.py run`, `verify.py attest` "
+            "and `verify.py import-ci` after activation, then compose the evidence/3 records they emit."
+        )
+    if schemas != {SCHEMA_V3}:
+        raise blocked("composition under evidence/3 accepts only verification.ladder.evidence/3 records")
+    records = [load_v3_record(path, shadow=False) for path in paths]
+
+    baseline_path = baseline_path_for(paths[0])
+    if not baseline_path.exists():
+        raise blocked("GOVERNING BASELINE MISSING: run `verify.py baseline` before the task and keep "
+                      ".verification/shadow/baseline.v3.json with the evidence")
+    baseline = load_baseline(baseline_path)
+    applies, why = baseline_applies(repo, baseline)
+    if not applies:
+        raise blocked(f"GOVERNING BASELINE MISSING: {why}")
+
+    policy_declared = policy(repo)
+    declared = shadow_declaration(policy_declared)
+    candidate = gate_definitions(repo, declared)
+    governance, governance_findings = governance_status(
+        baseline, candidate, [row for record in records for row in record.get("gates") or []], declared)
+    definitions = candidate if governance == DEFINITION_PENDING else governing_definitions(baseline)
+    current_target = v3_current_target(repo, policy_declared, exclude)
+    repository_states = {(record.get("target_state") or {}).get("repository", {}).get("worktree_state")
+                         for record in records}
+    composed_state = next(iter(repository_states)) if len(repository_states) == 1 else None
+    current_repository = current_target["repository"]
+    state_match = bool(composed_state) and all(
+        (record.get("target_state") or {}).get("repository") == current_repository for record in records
+        if (record.get("target_state") or {}).get("repository", {}).get("worktree_state") == composed_state)
+
+    findings = []
+    status, reason = verifier_status(records)
+    if status != ADMISSIBLE:
+        findings.append(reason)
+    if len(repository_states) != 1:
+        findings.append("records describe different repository states; composition needs one state")
+    if governance == DEFINITION_PENDING:
+        findings.append("DEFINITION CHANGE PENDING: " + "; ".join(governance_findings))
+
+    rows_by_gate: dict[str, list[dict]] = {}
+    all_rows = []
+    evaluation_rows = []
+    judgments = declared.get("judgment_rungs") or []
+    for record in records:
+        record_findings = ci_status_for_v3(
+            record, policy_declared, (record.get("target_state") or {}).get("repository") or {})
+        findings.extend(record_findings)
+        for row in record.get("gates") or []:
+            claimed = {**row, "authority": record.get("authority")}
+            all_rows.append(row)
+            evaluation_rows.append(claimed)
+            rows_by_gate.setdefault(row.get("gate"), []).append(claimed)
+
+    accepted_executions, accepted_judgments = set(), set()
+    for row in evaluation_rows:
+        name = row.get("gate")
+        kind = row.get("kind")
+        status, reason = kind_status(row, definitions, judgments)
+        if status != ADMISSIBLE:
+            findings.append(reason)
+            continue
+        if name in judgments:
+            if row.get("status") == PASS:
+                accepted_judgments.add(name)
+            else:
+                findings.append(f"{name}: {row.get('status')}")
+            continue
+        if kind == ATTESTATION:
+            continue
+        status, reason = gate_admissibility(row, definitions, current_target)
+        if status != ADMISSIBLE:
+            findings.append(reason)
+            continue
+        status, reason = behavioural_status({k: v for k, v in row.items() if k != "authority"},
+                                            definitions, all_rows, repo)
+        if status != ADMISSIBLE:
+            findings.append(reason)
+            continue
+        if row.get("status") == PASS:
+            accepted_executions.add(name)
+        else:
+            findings.append(f"{name}: {row.get('status')}")
+
+    required = declared.get("required_gates") or []
+    for gate in required:
+        if gate not in accepted_executions:
+            findings.append(f"{gate}: no admissible execution evidence")
+    for rung in judgments:
+        if rung not in accepted_judgments:
+            findings.append(f"{rung}: not attested for this state")
+    for record in records:
+        for gate in record.get("unpaired") or []:
+            if gate in required and gate not in accepted_executions:
+                findings.append(f"{gate}: UNCOVERED")
+
+    admissible = not [f for f in findings if not f.startswith("DEFINITION CHANGE PENDING")]
+    clean = admissible and governance == DEFINITION_UNCHANGED and state_match
+    ready = admissible and state_match
+    verdict = COMPLETE if ready else (STALE if not state_match else INCOMPLETE)
+    composite = {
+        "schema": "verification.ladder.composite/3",
+        "recorded_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "state": {"head": head_sha(repo), "state_id": composed_state,
+                  "current_state_id": current_repository["worktree_state"], "match": state_match},
+        "sources": [{"authority": record.get("authority"), "path": path.name}
+                    for path, record in zip(paths, records, strict=True)],
+        "rows": [{"gate": name, "status": PASS if name in accepted_executions or name in accepted_judgments else BLOCKED,
+                  "kind": EXECUTION if name in required else ATTESTATION,
+                  "authorities": sorted({row.get("authority") for row in rows if row.get("authority")})}
+                 for name, rows in sorted(rows_by_gate.items())],
+        "findings": findings,
+        "governance": governance,
+        "verdict": verdict,
+    }
+    if output:
+        emit(composite, output)
+    summarize_composite_v3(composite, declared, clean=clean, admissible=admissible, ready=ready, file=sys.stdout)
+    return EXIT[verdict]
 
 
 def command_baseline(args) -> int:
@@ -1748,6 +2043,39 @@ EVIDENCE_DIR = ".verification"
 SHADOW_DIR = "shadow"
 
 
+def authority_path(repo: Path) -> Path:
+    return repo / EVIDENCE_DIR / "authority.json"
+
+
+def authority_active(repo: Path) -> bool:
+    path = authority_path(repo)
+    if not path.exists():
+        return False
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return record.get("schema") == AUTHORITY_SCHEMA and record.get("authority") == SCHEMA_V3
+
+
+def load_v3_record(path: Path, *, shadow: bool | None = None) -> dict:
+    record = load_json(path)
+    if record.get("schema") != SCHEMA_V3:
+        raise blocked(f"{path}: not a {SCHEMA_V3} record")
+    if shadow is True and not record.get("shadow"):
+        raise blocked(f"{path}: not a shadow record; expected the M1-M3 diagnostic copy")
+    if shadow is False and record.get("shadow"):
+        raise blocked(f"{path}: shadow evidence/3 is diagnostic only; run the gate again after activation")
+    return record
+
+
+def make_authoritative_v3(record: dict, verdict: str) -> dict:
+    direct = dict(record)
+    direct.pop("shadow", None)
+    direct["verdict"] = verdict
+    return direct
+
+
 def relative_inside(repo: Path, paths) -> frozenset[str]:
     """Evidence files written into the checkout must not perturb the state they describe.
 
@@ -1859,6 +2187,15 @@ def command_run(args) -> int:
         # paths tell them it was their own test runner's cache, and that the fix
         # is .gitignore rather than the change under verification.
         record["drift_paths"] = sorted({path for _, path in before_paths ^ state_paths(repo, exclude)})
+    if authority_active(repo):
+        direct = make_authoritative_v3(shadow_record(
+            repo, declared, results, "local",
+            shadow_target(repo, declared, repository_identity(repo, exclude)),
+            recorded_at=record["recorded_at"], drift=drift, gate_set=record["gate_set"]), record["verdict"])
+        emit(direct, output)
+        summarize_v3_record(direct, output, file=sys.stderr)
+        return EXIT[record["verdict"]]
+
     emit(record, output)
     summarize(record, output, file=sys.stderr)
     # After the authoritative record is written and its verdict is fixed. The
@@ -1885,11 +2222,22 @@ def command_attest(args) -> int:
 
     kept = []
     if output.exists():
-        previous = load_record(output)
-        if previous["repository"]["state_id"] == current:
-            kept = [gate for gate in previous["gates"] if gate["name"] != args.rung]
+        previous = load_json(output)
+        if previous.get("schema") == SCHEMA:
+            if previous["repository"]["state_id"] == current:
+                kept = [gate for gate in previous["gates"] if gate["name"] != args.rung]
+            else:
+                print(f"state moved since {output}; earlier attestations discarded", file=sys.stderr)
+        elif previous.get("schema") == SCHEMA_V3:
+            repository = (previous.get("target_state") or {}).get("repository") or {}
+            if repository.get("worktree_state") == current:
+                kept = [{"name": gate["gate"], "kind": gate["kind"], "status": gate["status"],
+                         **{k: gate[k] for k in ("note", "at", "execution_ref", "artifact_refs") if k in gate}}
+                        for gate in previous.get("gates") or [] if gate.get("gate") != args.rung]
+            else:
+                print(f"state moved since {output}; earlier attestations discarded", file=sys.stderr)
         else:
-            print(f"state moved since {output}; earlier attestations discarded", file=sys.stderr)
+            raise blocked(f"{output}: not a readable verification evidence record")
 
     attestation = {
         "name": args.rung,
@@ -1899,6 +2247,15 @@ def command_attest(args) -> int:
         "at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
     }
     record = new_record(repo, "agent", [*kept, attestation], exclude, state=current, verdict=PASS)
+    if authority_active(repo):
+        direct = make_authoritative_v3(shadow_attestation(
+            repo, record, Path(args.execution).resolve() if args.execution else None,
+            exclude, output), PASS)
+        emit(direct, output)
+        print(f"attested {args.rung} for {current} (evidence/3 authoritative)", file=sys.stderr)
+        summarize_v3_record(direct, output, file=sys.stderr)
+        return 0
+
     emit(record, output)
     print(f"attested {args.rung} for {current}", file=sys.stderr)
     # The authoritative record is written and unchanged by everything below.
@@ -2008,22 +2365,32 @@ def command_import_ci(args) -> int:
         "verdict": verdict_of(gates, drift=False),
     }
     output = Path(args.output).resolve() if args.output else None
+    source = {"repository": (run.get("repository") or {}).get("full_name"),
+              "run_id": run.get("id"), "run_attempt": run.get("run_attempt"),
+              "workflow": run.get("path"), "job": job.get("name"),
+              "job_run_id": job.get("run_id"), "job_run_attempt": job.get("run_attempt"),
+              "event": event, "head_sha": sha,
+              # The conclusions as given, not the statuses v2 derived from
+              # them. Reading back a summary of an answer only establishes
+              # that the summary was copied correctly; `ci_step_status` has to
+              # meet the same payload v2 met.
+              "steps": [{"name": step.get("name"), "conclusion": step.get("conclusion")}
+                        for step in job.get("steps") or []]}
+    if authority_active(repo):
+        direct = make_authoritative_v3(shadow_record(
+            repo, declared, gates, "ci", {"repository": clean_repository_identity(sha)},
+            recorded_at=record["recorded_at"], source=source), record["verdict"])
+        emit(direct, output)
+        summarize_v3_record(direct, output, file=sys.stderr)
+        return EXIT[record["verdict"]]
+
     emit(record, output)
     summarize(record, output, file=sys.stderr)
     emit_shadow(repo, output, lambda: shadow_record(
         repo, declared, gates, "ci",
         {"repository": clean_repository_identity(sha)},
         recorded_at=record["recorded_at"],
-        source={"repository": (run.get("repository") or {}).get("full_name"),
-                "run_id": run.get("id"), "run_attempt": run.get("run_attempt"),
-                "workflow": run.get("path"), "job": job.get("name"),
-                "job_run_id": job.get("run_id"), "event": event, "head_sha": sha,
-                # The conclusions as given, not the statuses v2 derived from
-                # them. Reading back a summary of an answer only establishes
-                # that the summary was copied correctly; `ci_step_status` has to
-                # meet the same payload v2 met.
-                "steps": [{"name": step.get("name"), "conclusion": step.get("conclusion")}
-                          for step in job.get("steps") or []]}))
+        source=source))
     return EXIT[record["verdict"]]
 
 
@@ -2078,6 +2445,8 @@ def completion_findings(rows: dict[str, dict], declared: dict) -> list[str]:
 
 def command_compose(args) -> int:
     repo = require_repository(Path(args.repo).resolve())
+    if authority_active(repo):
+        return command_compose_v3(args)
     paths = [Path(p).resolve() for p in args.paths]
     output = Path(args.output).resolve() if args.output else None
     exclude = relative_inside(repo, [*paths, output])
@@ -2150,6 +2519,19 @@ def summarize(record: dict, path: Path | None, *, file, current_state: str | Non
         print(f"  evidence {path}", file=file)
 
 
+def summarize_v3_record(record: dict, path: Path | None, *, file) -> None:
+    repository = (record.get("target_state") or {}).get("repository") or {}
+    print(f"{record.get('verdict', PASS)}  {repository.get('head', '')[:12]}  "
+          f"[{record.get('authority', 'local')}, evidence/3]", file=file)
+    print(f"  state    {repository.get('worktree_state')}", file=file)
+    for gate in record.get("gates") or []:
+        detail = gate.get("reason") or gate.get("note") or (
+            f"exit {gate['exit_code']}" if "exit_code" in gate else gate.get("step", gate["kind"]))
+        print(f"  {gate['status']:<7} {gate['gate']} ({detail})", file=file)
+    if path:
+        print(f"  evidence {path}", file=file)
+
+
 def summarize_composite(composite: dict, declared: dict, *, file) -> None:
     state = composite["state"]
     print(f"VERIFICATION STATE: {state['head'][:12]} + {state['state_id']}\n", file=file)
@@ -2178,6 +2560,37 @@ def summarize_composite(composite: dict, declared: dict, *, file) -> None:
     print(f"  CLEAN CLIMB              {str(clean).upper()}", file=file)
     print("  " + "-" * 62, file=file)
     print(f"  READY FOR HUMAN GATE     {str(clean).upper()}", file=file)
+    for finding in composite["findings"]:
+        print(f"    - {finding}", file=file)
+    if not state["match"]:
+        print(f"    - evidence binds to {state['state_id']}, checkout is {state['current_state_id']}", file=file)
+
+
+def summarize_composite_v3(composite: dict, declared: dict, *, clean: bool, admissible: bool,
+                           ready: bool, file) -> None:
+    state = composite["state"]
+    print(f"VERIFICATION STATE: {state['head'][:12]} + {state['state_id']}  [evidence/3]\n", file=file)
+    required = list(declared.get("required_gates", []))
+    established = {row["gate"] for row in composite["rows"]}
+    for row in composite["rows"]:
+        mark = "*" if row["gate"] in required else " "
+        print(f"  {mark} {row['gate']:<18} {row['status']:<7} {row['kind']:<12} "
+              f"{', '.join(row['authorities'])}", file=file)
+    for gate in required:
+        if gate not in established:
+            print(f"  * {gate:<18} {'MISSING':<7} {'-':<12} no evidence", file=file)
+    blocked_required = sum(1 for gate in required
+                           if gate not in established or gate not in {
+                               row["gate"] for row in composite["rows"] if row["status"] == PASS})
+    print("  " + "-" * 62, file=file)
+    print(f"  BLOCKED REQUIRED GATES   {blocked_required}", file=file)
+    print(f"  STALE EVIDENCE           {0 if state['match'] else len(composite['sources'])}", file=file)
+    print(f"  STATE MATCH              {str(state['match']).upper()}", file=file)
+    print(f"  EVIDENCE ADMISSIBLE      {str(admissible).upper()}", file=file)
+    print(f"  DEFINITION CHANGE        {composite['governance']}", file=file)
+    print(f"  CLEAN CLIMB              {str(clean).upper()}", file=file)
+    print("  " + "-" * 62, file=file)
+    print(f"  READY FOR HUMAN GATE     {str(ready).upper()}", file=file)
     for finding in composite["findings"]:
         print(f"    - {finding}", file=file)
     if not state["match"]:
@@ -2236,6 +2649,12 @@ def main(argv: list[str] | None = None) -> int:
     qualifier.add_argument("paths", nargs="+", help="the authoritative evidence records to qualify over")
     qualifier.add_argument("--output", help="write the qualification report here")
     qualifier.set_defaults(handler=command_qualify)
+
+    activator = sub.add_parser(
+        "activate", help="§M4: make qualified evidence/3 the authoritative completion path")
+    activator.add_argument("paths", nargs="+", help="pre-activation evidence/2 records whose shadows qualify M4")
+    activator.add_argument("--output", help="write the authority declaration here")
+    activator.set_defaults(handler=command_activate)
 
     checker = sub.add_parser("check", help="re-bind a record to the current state")
     checker.add_argument("path", help="evidence record to check")

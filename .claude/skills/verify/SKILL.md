@@ -85,21 +85,26 @@ The event must be `push`. A `pull_request` run checks out a synthetic merge and
 - **Malformed input.** `--gate lint=`, `--gate noequals`, a missing record, a
   non-repository `--repo` — each has its own message and exits 2.
 
-## The evidence/3 shadow surfaces
+## The evidence/3 activation path
 
 `run`, `attest` and `import-ci` each write an evidence/3 shadow beside their
-authoritative record, under `.verification/shadow/`. Three further commands read
-them and decide nothing:
+pre-activation record, under `.verification/shadow/`. Three diagnostic commands
+read them, and `activate` writes the local declaration that makes later v3
+records authoritative:
 
 ```sh
 python3 "$V" baseline                                    # definitions, before the task
 python3 "$V" attest --rung verify-login --note "watched it"     --execution .verification/local.json                 # binds judgment to execution
 python3 "$V" compare .verification/local.json     --attestations .verification/attestations.json
 python3 "$V" qualify .verification/*.json
+python3 "$V" activate .verification/*.json
 ```
 
 `compare` exits 0 agree / 1 disagree / 2 not comparable; `qualify` adds
-`UNCOVERED` for a predicate nothing reached. Neither touches a verdict.
+`UNCOVERED` for a predicate nothing reached. Neither touches a verdict. After
+`activate` succeeds, new `run`, `attest` and `import-ci` outputs are
+`verification.ladder.evidence/3`, `compose` is authoritative v3, and old
+`evidence/2` records are migration diagnostics only.
 
 To exercise behavioural gates, the runtime dimension or artifacts, the consumer
 policy needs a `[shadow]` layer - `templates/verification.toml` carries a
@@ -115,9 +120,7 @@ commented example of all three. Two traps worth knowing:
 
 ## Measuring what the CLI actually reaches
 
-Much of `verify.py` is the evidence/3 model, which is deliberately not wired to
-any subcommand yet. To check whether a function is reachable from the CLI rather
-than assuming:
+To check whether a function is reachable from the CLI rather than assuming:
 
 ```sh
 python3 -m trace --listfuncs "$V" run --output /dev/null 2>&1 | grep 'funcname: <name>$'

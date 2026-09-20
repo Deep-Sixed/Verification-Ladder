@@ -63,6 +63,13 @@ def test_another_attempt_is_refused():
     assert "attempt 3" in reason
 
 
+@pytest.mark.parametrize(("run_over", "job_over"), [({"run_attempt": None}, {}), ({}, {"run_attempt": None})])
+def test_a_missing_attempt_identity_is_unverifiable(run_over, job_over):
+    status, reason = verify.ci_provenance_status(_run(**run_over), _job(**job_over), EXPECTED)
+    assert status == verify.INADMISSIBLE
+    assert "run_attempt" in reason
+
+
 def test_the_wrong_workflow_is_refused():
     status, reason = verify.ci_provenance_status(_run(path=".github/workflows/release.yml"), _job(), EXPECTED)
     assert status == verify.INADMISSIBLE
