@@ -758,6 +758,34 @@ def ci_step_status(job: dict, step_name: str) -> tuple[str, str | None]:
     return verdict, None
 
 
+def verifier_status(records: list[dict]) -> tuple[str, str | None]:
+    """Whether these records were produced under one set of admissibility rules.
+
+    Provenance and contract are different questions. `commit` and
+    `implementation_sha256` say which build wrote a record and are reported, never
+    compared - two builds of the same contract compose. `compatibility` is the
+    contract, and records carrying different contracts do not compose, because a
+    verifier can keep the v3 record shape while changing what admissible means.
+    Composing across that change would let a record established under weaker
+    rules stand beside one established under stronger ones.
+    """
+    contracts = {}
+    for record in records:
+        verifier = record.get("verifier")
+        if not isinstance(verifier, dict) or not verifier.get("compatibility"):
+            return INADMISSIBLE, ("a record carries no verifier compatibility contract, so there is no "
+                                  "way to tell which rules produced it")
+        contracts.setdefault(verifier["compatibility"], []).append(verifier.get("commit"))
+    if len(contracts) > 1:
+        return INADMISSIBLE, ("records were produced under different verifier contracts (" +
+                              ", ".join(sorted(contracts)) + "); re-verify under one")
+    contract = next(iter(contracts))
+    if contract != COMPATIBILITY:
+        return INADMISSIBLE, (f"records were produced under contract {contract!r}, this verifier "
+                              f"applies {COMPATIBILITY!r}; re-verify under the rules in force")
+    return ADMISSIBLE, None
+
+
 def load_json(path: Path) -> dict:
     try:
         return json.loads(path.read_text())

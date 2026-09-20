@@ -22,7 +22,22 @@ ln -s ~/src/verification-ladder/skills/verification-ladder ~/.claude/skills/veri
 ```
 
 A linked skill is available in every repository, and `git pull` in the clone
-updates every agent at once. The skill's own directory is reported to the agent
+updates every agent at once.
+
+**Check out a release tag rather than tracking `main`.** Evidence records will
+carry the verifier's compatibility contract, and composition will require every
+record in one composite to share it. A clone that moves under the agent changes
+the rules mid-task: records taken before the pull and after it can stop
+composing, for a reason that has nothing to do with the code under verification.
+Updating every agent at once is still the point — make it a deliberate step:
+
+```sh
+git -C ~/src/verification-ladder fetch --tags
+git -C ~/src/verification-ladder checkout v0.1.0   # the release you intend
+```
+
+Re-verify anything in flight after an upgrade that changes evidence semantics;
+the release notes say when that is. The skill's own directory is reported to the agent
 when the skill loads, which is how it finds `bin/verify.py`.
 
 ## Codex — not yet verified
