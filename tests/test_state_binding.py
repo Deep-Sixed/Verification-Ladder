@@ -143,6 +143,27 @@ def test_state_change_during_the_run_blocks_the_result(repo, tmp_path):
     assert record["state_id_after"] != record["repository"]["state_id"]
 
 
+def test_drift_names_the_paths_that_moved(repo, tmp_path):
+    """A digest cannot say what changed, and "two state ids" sends nobody anywhere.
+
+    The common cause is a gate writing its own cache into the tree it is being
+    measured against, so the record names the paths and the fix is obvious.
+    """
+    litter = tmp_path / "litter.py"
+    litter.write_text("from pathlib import Path\nPath('.toolcache').mkdir(exist_ok=True)\n"
+                      "Path('.toolcache/out.bin').write_text('x')\n")
+    code, record = record_of(repo, ("littering", f"{sys.executable} {litter}"))
+    assert (code, record["drift"]) == (2, True)
+    assert record["gates"][0]["status"] == "PASS"
+    assert record["drift_paths"] == [".toolcache/out.bin"]
+
+
+def test_a_clean_run_records_no_drift_paths(repo):
+    _, record = record_of(repo, ("unit", PASS_GATE))
+    assert record["drift"] is False
+    assert "drift_paths" not in record, "a path list on a clean run would imply drift there was none"
+
+
 def test_record_written_inside_the_repository_does_not_invalidate_itself(repo):
     evidence = repo / ".verification" / "latest.json"
     code, record = record_of(repo, ("unit", PASS_GATE), output=evidence)

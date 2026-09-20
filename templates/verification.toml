@@ -20,6 +20,19 @@ ci_head_events = ["push"]
 
 # What this checkout can execute, in the order it should run. Use the commands a
 # contributor runs locally, exactly as they would type them.
+#
+# These two examples assume the caches they create - __pycache__/, *.py[cod],
+# .pytest_cache/, .ruff_cache/ - are git-ignored. They are not, by default: a
+# gate whose output lands in the tree moves the state it is being measured
+# against, and the run reports BLOCKED on drift with every gate passing.
+# INSTALL.md lists the set to ignore. Ignore disposable tool output only - a gate
+# that reformats source, updates a lockfile or regenerates checked-in code has
+# changed repository state, and drift is then the correct, intended answer.
+#
+# `python -m pytest -q` exits 5 when it collects no tests, which reads as FAIL.
+# That is accurate for a project with no tests yet: tailor this policy to what
+# the project actually requires, as part of the reviewed change that adopts it.
+# Do not redefine "nothing ran" as success.
 [gates.local]
 lint = "ruff check ."
 tests = "python -m pytest -q"

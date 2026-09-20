@@ -106,8 +106,31 @@ cp ~/src/verification-ladder/templates/verification.toml <repo>/verification.tom
 
 Then make it true for that project: its required gates, the commands a
 contributor actually runs, and the CI step that establishes each gate the
-checkout cannot run. Add `.verification/` to its `.gitignore` — evidence records
-are operational, not repository content.
+checkout cannot run.
+
+Then extend its `.gitignore`. Evidence records are operational rather than
+repository content, and so is whatever the gates themselves write:
+
+```
+.verification/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+```
+
+The last four are what the shipped `ruff` / `pytest` template produces. They
+matter because a gate's own output lands in the tree the gate is being measured
+against: `state_id` moves between the start and the end of the run, and
+`verify.py run` reports **BLOCKED — drift** with both gates passing. A project
+whose gates use other tooling ignores that tooling's caches instead.
+
+**Ignore disposable tool output, never project-significant output.** If a gate
+reformats source, updates a lockfile or regenerates checked-in code, that change
+is repository state and drift is the correct answer — the result binds to no
+single state and BLOCKED is what it should say. Widening `.gitignore` to make
+such a run go green hides a real change to get a PASS, which is the failure this
+tool exists to prevent.
 
 Commit it as its own reviewed change. What "complete" means for a project is a
 decision that deserves review, not something an agent improvises mid-task.

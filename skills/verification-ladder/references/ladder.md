@@ -137,8 +137,13 @@ then bring its result back:
 
 ```sh
 # fetch the run that CHECKED OUT this commit - on GitHub that is the push run -
-# and its job, writing the payloads to disk
-python "$VERIFY" import-ci --run run.json --job job.json --output .verification/ci.json
+# and its job. Write the payloads under .verification/import/, never into the
+# checkout: an untracked run.json at the root changes the state being verified,
+# and the composite then reports STATE MATCH FALSE against your own evidence.
+python "$VERIFY" import-ci \
+    --run .verification/import/github-run.json \
+    --job .verification/import/github-job.json \
+    --output .verification/ci.json
 python "$VERIFY" compose .verification/local.json .verification/ci.json \
     .verification/attestations.json --output .verification/composite.json
 ```

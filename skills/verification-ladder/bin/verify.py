@@ -154,6 +154,19 @@ def require_repository(repo: Path) -> Path:
     return repo
 
 
+def state_paths(repo: Path, exclude: frozenset[str] = frozenset()) -> set[tuple[str, str]]:
+    """The (status, path) pairs `state_id` folds in - for diagnostics only.
+
+    A state id is a digest and so cannot say what moved. Comparing these across a
+    run names the paths that appeared, vanished or changed status, which is nearly
+    always a gate writing its own cache into the tree it is being measured against.
+    Content that changes without changing status is invisible here; drift is still
+    reported, just without the path list.
+    """
+    entries = _status_entries(git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all"))
+    return {(status, path) for status, path in entries if path not in exclude}
+
+
 def is_dirty(repo: Path, exclude: frozenset[str] = frozenset()) -> bool:
     entries = _status_entries(git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all"))
     return any(path not in exclude for _, path in entries)
@@ -310,6 +323,7 @@ def command_run(args) -> int:
     exclude = relative_inside(repo, [output])
 
     before = state_id(repo, exclude)
+    before_paths = state_paths(repo, exclude)
     dirty = is_dirty(repo, exclude)
     results = [run_gate(repo, name, command) for name, command in gates]
     after = state_id(repo, exclude)
@@ -321,6 +335,10 @@ def command_run(args) -> int:
     record |= {"drift": drift, "verdict": verdict_of(results, drift)}
     if drift:
         record["state_id_after"] = after
+        # Name what moved. Two digests tell a reader that something changed; the
+        # paths tell them it was their own test runner's cache, and that the fix
+        # is .gitignore rather than the change under verification.
+        record["drift_paths"] = sorted({path for _, path in before_paths ^ state_paths(repo, exclude)})
     emit(record, output)
     summarize(record, output, file=sys.stderr)
     return EXIT[record["verdict"]]
@@ -528,6 +546,13 @@ def summarize(record: dict, path: Path | None, *, file, current_state: str | Non
         print(f"  {gate['status']:<7} {gate['name']} ({detail})", file=file)
     if record.get("drift"):
         print("  drift    repository changed while gates ran; results bind to no single state", file=file)
+        moved = record.get("drift_paths", [])
+        for changed in moved:
+            print(f"           moved  {changed}", file=file)
+        if moved:
+            print("           a gate wrote into the tree it was measuring. Git-ignore it if it is "
+                  "disposable\n           tool output; if it is real repository state, BLOCKED is "
+                  "the right answer.", file=file)
     if path:
         print(f"  evidence {path}", file=file)
 

@@ -78,7 +78,10 @@ conclusions, and the run payload carries the authoritative commit, so the agent
 fetches the run and its job with its GitHub tools and normalizes them:
 
 ```sh
-python "$VERIFY" import-ci --run run.json --job job.json --output .verification/ci.json
+python "$VERIFY" import-ci \
+    --run .verification/import/github-run.json \
+    --job .verification/import/github-job.json \
+    --output .verification/ci.json
 ```
 
 - The gate-to-step map lives in the policy under `[ci_steps]`, so a renamed

@@ -113,8 +113,14 @@ Three authorities can establish something, and they establish different things.
 # what this checkout can execute, per the project's [gates.local]
 python "$VERIFY" run --output .verification/local.json
 
-# what only CI can execute: fetch the run that CHECKED OUT this commit
-python "$VERIFY" import-ci --run run.json --job job.json --output .verification/ci.json
+# what only CI can execute: fetch the run that CHECKED OUT this commit.
+# Payloads go under .verification/import/ - a raw payload written into the
+# checkout would change the state under verification, and one written to
+# .verification/ directly would be globbed into compose as if it were evidence.
+python "$VERIFY" import-ci \
+    --run .verification/import/github-run.json \
+    --job .verification/import/github-job.json \
+    --output .verification/ci.json
 
 # what no machine can execute - the judgment rungs, one line each
 python "$VERIFY" attest --rung diff --note "read every hunk; nothing unrelated"
@@ -128,8 +134,11 @@ An attestation is not an execution and never satisfies a required gate. Saying
 composite prints the distinction rather than hiding it.
 
 Records are operational evidence, not repository content: keep them under
-`.verification/` (git-ignored) and quote from them in the report instead of
-committing them.
+`.verification/` and quote from them in the report instead of committing them.
+That directory must be git-ignored, along with whatever caches the project's
+gates write - a gate whose own output lands in the tree moves the state it was
+measuring, and the run reports BLOCKED on drift. `INSTALL.md` lists the set for
+the shipped template.
 
 ## Completion gate
 
