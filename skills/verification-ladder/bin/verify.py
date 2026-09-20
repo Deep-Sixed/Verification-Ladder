@@ -69,6 +69,9 @@ EVIDENCE_MODES = ("execution", "execution+attestation")
 # INADMISSIBLE is not a failure of the change: it says the evidence cannot be
 # read at all, because it does not carry a dimension its own gate declares.
 ADMISSIBLE, INADMISSIBLE = "ADMISSIBLE", "INADMISSIBLE"
+# A task that changes a verification definition is its own class, with its own
+# terminal state. A definition never governs its own introduction.
+DEFINITION_UNCHANGED, DEFINITION_PENDING = "NONE", "PENDING"
 # Keys that only an evidence/3 per-gate declaration carries. Their presence is
 # what separates "this policy is written in the v3 form" from "this gate name
 # has a dot in it", which read identically once TOML has parsed them.
@@ -784,6 +787,53 @@ def verifier_status(records: list[dict]) -> tuple[str, str | None]:
         return INADMISSIBLE, (f"records were produced under contract {contract!r}, this verifier "
                               f"applies {COMPATIBILITY!r}; re-verify under the rules in force")
     return ADMISSIBLE, None
+
+
+def governing_definitions(baseline: dict) -> dict:
+    """The gate definitions in force for this task: the ones captured at baseline.
+
+    Not the working tree's. A policy read from the tree at composition time is one
+    the task could have edited, so a change could weaken the rule that judges it -
+    and would not even need committing to do so.
+    """
+    if baseline.get("schema") != BASELINE_SCHEMA:
+        raise blocked(f"governing definitions need a {BASELINE_SCHEMA} record, got {baseline.get('schema')!r}")
+    return baseline["governing"]["gates"]
+
+
+def definition_change(baseline: dict, candidate: dict) -> tuple[str, list[str]]:
+    """Which gates mean something different now from what they meant at baseline.
+
+    Gate-scoped on purpose. A shared policy file hashed wholesale would fold into
+    every gate's identity, so editing one gate's command would report every other
+    gate as changed and the distinction would be useless.
+    """
+    governing = governing_definitions(baseline)
+    changed = [name for name, definition in candidate.items()
+               if name in governing and definition["definition_sha256"] != governing[name]["definition_sha256"]]
+    changed += [f"{name} (added)" for name in candidate if name not in governing]
+    changed += [f"{name} (removed)" for name in governing if name not in candidate]
+    return (DEFINITION_PENDING if changed else DEFINITION_UNCHANGED), sorted(changed)
+
+
+def governance_status(baseline: dict, candidate: dict, rows: list[dict]) -> tuple[str, list[str]]:
+    """Whether this task may report a clean climb, or is a governance change.
+
+    A task that changes what a gate means may collect evidence under the new
+    definition - that is how a verification change gets reviewed at all - but the
+    evidence is about the candidate, and CLEAN CLIMB must not read TRUE on the
+    strength of it. The human gate decides whether the candidate becomes
+    governing, and only then for subsequent tasks.
+    """
+    state, changed = definition_change(baseline, candidate)
+    if state == DEFINITION_UNCHANGED:
+        return DEFINITION_UNCHANGED, []
+    governing = governing_definitions(baseline)
+    under_candidate = sorted({
+        row["gate"] for row in rows
+        if row.get("gate") in governing
+        and row.get("definition_sha256") != governing[row["gate"]]["definition_sha256"]})
+    return DEFINITION_PENDING, [f"{name}: candidate definition only" for name in under_candidate] or changed
 
 
 def load_json(path: Path) -> dict:
