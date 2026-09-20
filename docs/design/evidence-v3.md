@@ -266,6 +266,146 @@ A findings ledger may be a later feature. Consequently the adversarial test for
 "a purported clean result while a tracked finding remains open" is **blocked on
 that ledger and is not a v3 acceptance test.**
 
+## I. Target-state projection
+
+The worked example concludes that a moved runtime expires `verify-login` while
+`lint` and CI `tests` survive. That conclusion is right, and it proves
+`target_state matches` **cannot mean whole-record equality**. Lint has no
+runtime; comparing one against the current runtime would expire it for a reason
+that cannot affect it.
+
+The prose alone does not give the composer a rule for reaching that result, and
+the gap is exploitable: if runtime is optional-by-convention, an agent omits
+`runtime` from a behavioural record and freshness silently becomes an assertion
+the agent chooses to make.
+
+**Decision.** Each gate **declares the target dimensions it depends on**, and
+that declaration is part of the gate's identity.
+
+```toml
+[gates.local.lint]
+command = "ruff check ."
+target  = ["repository"]
+
+[gates.behavioral.verify-login]
+target  = ["repository", "runtime"]
+```
+
+Composition rules:
+
+1. Evidence **must carry every dimension** the gate definition declares.
+   A missing declared dimension is **inadmissible** — never "matched by
+   default". This is the rule that closes the omission attack.
+2. Dimensions the gate does not declare are **neither required nor compared**.
+   Extra dimensions present in a record are ignored for that gate.
+3. Each record is compared against the **current projection** of the target onto
+   exactly the dimensions its gate declares.
+4. An execution and its attestation, for one behavioural gate, must carry the
+   **same projection**. A judgment attested against one runtime does not carry
+   to another.
+5. `target` is folded into `definition_sha256`. Dropping `runtime` from a gate's
+   declaration is therefore a definition change that invalidates evidence
+   produced under the old declaration, rather than a quiet weakening.
+6. A gate declaring `runtime` when the runtime cannot be interrogated is
+   **BLOCKED**, per decision D — not a mismatch, and not a pass.
+
+**Consequence for the policy schema.** A gate can only declare a projection if
+it is a table, so v3's policy uses per-gate tables for all three gate classes:
+`[gates.local.<name>]`, `[gates.ci.<name>]` and `[gates.behavioral.<name>]`.
+The v2 forms `[gates.local] name = "command"` and `[ci_steps] name = "step"`
+cannot carry `target` and are replaced. The existing refusal of dotted gate
+names still applies and matters more here, since the name is now a table key.
+
+## J. The verifier compatibility contract
+
+Decision E says records carry exact verifier identity and compose under "the
+same compatibility contract". None of the fields proposed for the `verifier`
+block actually **names** that contract, so the implementation would have been
+asked to evaluate a concept absent from the record.
+
+**Decision.** Add an explicit `compatibility` field.
+
+```json
+{
+  "verifier": {
+    "schema": "verification.ladder.evidence/3",
+    "version": "0.2.0",
+    "compatibility": "evidence-v3.1",
+    "commit": "<verification-ladder commit>",
+    "implementation_sha256": "sha256:..."
+  }
+}
+```
+
+- `commit` and `implementation_sha256` are **provenance**: which build produced
+  this record. They are recorded, reported, and never used to decide
+  composability.
+- `compatibility` is the **contract**: composition requires every record in a
+  composition to carry the same value.
+- `schema` and `compatibility` are distinct. `schema` is the record's *shape*;
+  `compatibility` is the *semantics of the rules applied to it*. A verifier can
+  preserve the v3 shape while changing what admissible means, and that must
+  invalidate earlier evidence.
+
+A release that changes evidence semantics increments the contract and says so in
+its notes; a patch or documentation change that preserves semantics retains it.
+This makes "compatible verifier" and the INSTALL.md pinned-release rule
+mechanically decidable rather than conventional.
+
+## K. Execution identity for the artifact chain
+
+Decision C requires the chain
+`attestation → artifact digest → execution record → target_state`, but the
+attestation as proposed carries only artifact digests. Digests identify *bytes*;
+they do not identify **which execution record produced them**, so the composer
+had no way to walk the second link.
+
+**Decision.** An execution record carries a stable `record_id`, and an
+attestation names it.
+
+```json
+{
+  "kind": "execution",
+  "name": "verify-login",
+  "record_id": "sha256:E",
+  "artifacts": [ { "kind": "recording", "sha256": "sha256:B" } ]
+}
+```
+
+```json
+{
+  "kind": "attestation",
+  "name": "verify-login",
+  "execution_ref": "sha256:E",
+  "artifact_refs": ["sha256:B", "sha256:C"]
+}
+```
+
+`record_id` is the SHA-256 of the record's canonical form — UTF-8, keys sorted,
+no insignificant whitespace — computed with the `record_id` field itself
+excluded. It is **stored as a locator and recomputed at compose time**; a stored
+value that does not match the recomputed one fails closed, on the same principle
+as C1.
+
+Composition then proves the whole chain:
+
+```
+attestation
+    | execution_ref
+    v
+a specific execution record in this composition
+    | artifacts
+    v
+artifact digests --> rehashed from the actual files
+    |
+    v
+target projection --> current target
+```
+
+The referenced execution must be present in the composition, be of kind
+`execution`, name the **same gate**, and carry the **same projection** (§I.4).
+Artifact digests alone are never responsible for identifying their execution.
+
 ---
 
 ## The schema
@@ -320,7 +460,8 @@ A name is not an identity. Policy declares, per gate:
   "gate": "tests-py311",
   "definition_sha256": "sha256:...",
   "permitted_authorities": ["ci"],
-  "evidence_mode": "execution"
+  "evidence_mode": "execution",
+  "target": ["repository"]
 }
 ```
 
@@ -373,6 +514,7 @@ the interpretation. Neither absorbs the other.
 {
   "kind": "execution",
   "name": "verify-login",
+  "record_id": "sha256:E",
   "artifacts": [
     { "kind": "recording", "path": ".verification/artifacts/login.webm", "sha256": "sha256:B" },
     { "kind": "dom-proof", "path": ".verification/artifacts/login-dom.json", "sha256": "sha256:C" }
@@ -384,6 +526,7 @@ the interpretation. Neither absorbs the other.
 {
   "kind": "attestation",
   "name": "verify-login",
+  "execution_ref": "sha256:E",
   "artifact_refs": ["sha256:B", "sha256:C"],
   "note": "logged in via the real form; session survived reload"
 }
@@ -414,6 +557,7 @@ the current implementation and it is what the merge-run trap is made of.
   "verifier": {
     "schema": "verification.ladder.evidence/3",
     "version": "0.2.0",
+    "compatibility": "evidence-v3.1",
     "commit": "<verification-ladder commit>",
     "implementation_sha256": "sha256:..."
   }
@@ -428,14 +572,18 @@ BLOCKED; that behaviour is correct and is retained.)
 
 ## Completion rules
 
+Throughout, *target projection matches* means: the record carries every target
+dimension the gate definition declares, and each of those dimensions equals the
+current target's value for it (§I). Undeclared dimensions are not compared.
+
 **Mechanical executable gate:**
 
 ```
-definition matches
+definition matches                      (incl. declared target dimensions)
 AND authority permitted
 AND kind == execution
-AND target_state matches
-AND verifier compatible
+AND target projection matches
+AND verifier compatibility equal across the composition
 AND status == PASS
 ```
 
@@ -443,10 +591,11 @@ AND status == PASS
 
 ```
 all of the above
+AND an attestation exists whose execution_ref resolves to this execution
+AND that execution's recomputed record_id equals its stored record_id
 AND every declared artifact exists and rehashes to its recorded digest
-AND a required attestation exists
-AND that attestation references exactly those digests
-AND the referenced execution is in this composition, on this target_state
+AND the attestation references exactly those digests
+AND the attestation carries the same gate name and the same projection
 ```
 
 **Judgment rung:**
@@ -454,8 +603,8 @@ AND the referenced execution is in this composition, on this target_state
 ```
 definition matches
 AND kind == attestation
-AND target_state matches
-AND verifier compatible
+AND target projection matches
+AND verifier compatibility equal across the composition
 ```
 
 Symmetry is the point: an execution cannot impersonate a judgment, and a
@@ -508,19 +657,22 @@ required_gates   = ["lint", "tests", "verify-login"]
 judgment_rungs   = ["task", "diff", "self-review", "requirements", "architecture", "fresh-review"]
 ci_head_events   = ["push"]
 
-[gates.local]
-lint = "ruff check ."
+[gates.local.lint]
+command       = "ruff check ."
+target        = ["repository"]
+
+[gates.ci.tests]
+step          = "Run python -m pytest -q"
+target        = ["repository"]
 
 [gates.behavioral.verify-login]
-authorities     = ["local"]
-evidence_mode   = "execution+attestation"
-spec_root       = "verification/features"
-spec_files      = ["verification/features/sign-in.md"]
-driver          = "node verification/drive.mjs verify-login"
-artifacts       = ["recording", "dom-proof"]
-
-[ci_steps]
-tests = "Run python -m pytest -q"
+authorities   = ["local"]
+evidence_mode = "execution+attestation"
+target        = ["repository", "runtime"]
+spec_root     = "verification/features"
+spec_files    = ["verification/features/sign-in.md"]
+driver        = "node verification/drive.mjs verify-login"
+artifacts     = ["recording", "dom-proof"]
 ```
 
 ### The clean climb
@@ -534,14 +686,15 @@ result. This is the only evidence captured pre-mutation.
 `sha256:bb..`. Every baseline row is now about a different target, as intended.
 
 **3 — Mechanical local gates.** `lint` runs, PASS, authority `local`, kind
-`execution`, `definition_sha256` over its declared command. No `runtime` block:
-lint cannot depend on a running system.
+`execution`, `definition_sha256` over its declared command **and its declared
+projection** `["repository"]`. The record carries a repository dimension and no
+runtime, which is exactly what its declaration requires — not an omission.
 
 **4 — Resolve the behavioural specification.** `verify-login` declares
 `spec_root = verification/features` and `spec_files = [sign-in.md]`.
 `sign-in.md` hashes to `sha256:s1`, resolves beneath the root, and folds into
 `definition_sha256 = sha256:g1` together with the gate's declared driver,
-authorities and artifact list. This is the step decision B exists for: the gate's
+authorities, artifact list and projection `["repository", "runtime"]`. This is the step decision B exists for: the gate's
 meaning is those declared bytes, not whatever the agent happened to read.
 
 **5 — Interrogate the runtime.** The driver reports build `2026.09.20-1a2b`,
@@ -555,22 +708,28 @@ session RPC. Not an internal handler invoked directly.
 **7-8 — Artifacts and the behavioural execution.** `login.webm` →
 `sha256:B`; `login-dom.json` (post-reload session assertion) → `sha256:C`. The
 execution record carries both digests, `definition_sha256: g1`, authority
-`local`, kind `execution`, and `target_state {bb.., r1}`.
+`local`, kind `execution`, projection `{repository: bb.., runtime: r1}`, and its
+own `record_id = sha256:E` over its canonical form.
 
-**9 — Attest over exactly those bytes.** `artifact_refs: [B, C]`, kind
-`attestation`, same `target_state`.
+**9 — Attest over exactly those bytes, naming the execution.**
+`execution_ref: sha256:E`, `artifact_refs: [B, C]`, kind `attestation`, same
+gate name, same projection.
 
 **10 — Import CI.** The `push` run for commit `bb..` in **this** repository,
 attempt 1, workflow `ci.yml`, job `validate`, step `Run python -m pytest -q`,
 conclusion `success` → the `tests` gate, authority `ci`, `target_state`
 `{repository: bb.., runtime: absent}`.
 
-**11 — Compose.** The composer rehashes `login.webm` and `login-dom.json` from
-disk (C1), confirms they match B and C, confirms the attestation's referenced
-execution is present in this composition on target `{bb.., r1}` (C2),
-re-interrogates the runtime and confirms `r1`, recomputes repository state and
-confirms `bb..`, checks each gate's `definition_sha256` against the governing
-policy from the baseline record (§F, §11), and checks verifier compatibility.
+**11 — Compose.** The composer resolves `execution_ref: E` to the behavioural
+execution in this composition and recomputes its `record_id` (§K); rehashes
+`login.webm` and `login-dom.json` from disk and confirms B and C (C1); confirms
+the attestation names the same gate under the same projection (C2, §I.4);
+re-interrogates the runtime and confirms `r1`; recomputes repository state and
+confirms `bb..`; checks each gate against **its own declared projection** — so
+`lint` and `tests` are compared on repository alone and `verify-login` on
+repository and runtime (§I); checks each `definition_sha256` against the
+governing policy from the baseline record (§F); and confirms every record
+carries the same verifier `compatibility` (§J).
 
 **12-14 —**
 
@@ -620,9 +779,17 @@ STATE MATCH    FALSE          evidence binds to runtime sha256:r1,
 verify-login   STALE
 ```
 
-`lint` and `tests` survive — they carry no runtime and their repository state
-still matches. Only the behavioural gate expires. That granularity is the
-reason runtime lives in `target_state` rather than in a global freshness flag.
+`lint` and `tests` survive — they declare `target = ["repository"]`, so the
+composer never compares them against a runtime they cannot depend on, and their
+repository projection still matches. Only the behavioural gate expires. That
+granularity is what §I's per-gate projection buys; a global freshness flag would
+have expired all three.
+
+Note the omission attack this closes. An agent that re-recorded `verify-login`
+evidence *without* a runtime dimension does not thereby survive the move: the
+gate declares `runtime`, so a record lacking it is **inadmissible** rather than
+trivially matching (§I.1). And editing the declaration to drop `runtime` changes
+`definition_sha256`, which fails as V1 does.
 
 Had the driver been unable to reach the runtime at all, this would instead be
 **BLOCKED** (decision D) — no target, not a different one.
@@ -642,25 +809,23 @@ the general rule.
 
 ## Implementation series (after this note is reviewed)
 
-1. **Evidence schema v3** — target state incl. index, runtime manifest,
-   gate-definition identity, verification-spec digests, artifact digests,
-   artifact-bound attestations, verifier block, baseline record type.
-2. **Gate-definition and authority binding** — close name-based impersonation.
-3. **Symmetric execution/attestation enforcement** — close judgment-rung
-   impersonation.
-4. **CI provenance chain** — repository → run → attempt → workflow → job → step
+Nothing here begins until this note — including decisions I, J and K — is
+committed and reviewed. No evidence behaviour changes before then.
+
+1. **Schema-v3 data model**, parsing and validation.
+2. **Target projections** plus repository/index identity.
+3. **Gate definition and authority identity.**
+4. **Symmetric execution/attestation enforcement.**
+5. **Execution record ids and the artifact chain** (§K, C1, C2).
+6. **CI provenance chain** — repository → run → attempt → workflow → job → step
    → commit.
-5. **Verifier provenance and compatibility** — plus the INSTALL.md pinned-release
-   correction (decision E).
-6. **Governing-policy binding** — compose against the policy captured at
-   baseline, not the mutable working-tree copy.
-7. **Artifact rehashing and chain enforcement** — decisions C1 and C2.
-8. **Honest output** — `CLEAN CLIMB`, remove `UNRESOLVED FINDINGS`, add
-   `READY FOR HUMAN GATE`.
-9. **Documentation model** — baseline precondition, nine rungs, human gate;
-   correct the `state_id` claim.
-10. **Deferred items G1 and G2** — `--gate` must load policy; artifact paths
-    excluded from state by construction.
+7. **Verifier compatibility** (§J), plus the INSTALL.md pinned-release
+   correction (§E).
+8. **Governing baseline policy and specification binding** (§F).
+9. **Output and terminology** — `CLEAN CLIMB`, remove `UNRESOLVED FINDINGS`, add
+   `READY FOR HUMAN GATE`; correct the `state_id` claim.
+10. **G1 and G2** — `run --gate` must load policy; artifact paths excluded from
+    repository state by construction.
 11. **Adversarial regression suite.**
 
 ## Adversarial acceptance tests
@@ -674,16 +839,26 @@ Write these failing first. Composition must reject:
 5. a CI job paired with another run;
 6. CI evidence from another repository;
 7. CI evidence from the wrong workflow, job or step;
-8. evidence from an incompatible verifier version;
+8. evidence whose verifier `compatibility` differs from the rest of the
+   composition;
 9. two repository states with identical worktree bytes but different index
    contents;
 10. composition under a weakened working-tree policy;
 11. evidence produced before a declared specification file changed;
-12. a behavioural attestation referencing artifacts from an earlier execution;
+12. a declared specification file resolving outside its `spec_root`;
 13. a referenced artifact that is missing, or that rehashes differently;
-14. local and behavioural evidence whose runtime manifests differ;
-15. a declared specification file resolving outside its `spec_root`;
-16. a behavioural execution with no corresponding artifact-bound attestation.
+14. **a gate whose declared runtime projection differs from the current
+    runtime** — and, in the same composition, a `target = ["repository"]` gate
+    that correctly **survives** that same move. Both directions are the test;
+    asserting only the expiry would pass a global freshness flag;
+15. evidence omitting a target dimension its gate definition declares;
+16. an attestation whose `execution_ref` resolves to no execution record in the
+    composition;
+17. an attestation whose `execution_ref` names an execution for a different
+    gate, or carrying a different projection;
+18. an execution record whose recomputed `record_id` differs from the stored
+    one;
+19. a behavioural execution with no corresponding artifact-bound attestation.
 
 Distinguished from the above, and asserted separately: an unreachable runtime
 yields **BLOCKED**, not a state mismatch.
