@@ -406,6 +406,164 @@ The referenced execution must be present in the composition, be of kind
 `execution`, name the **same gate**, and carry the **same projection** (§I.4).
 Artifact digests alone are never responsible for identifying their execution.
 
+## L. Definition changes and bootstrap migration
+
+Everything above defines what happens when a definition changes *accidentally or
+maliciously*: evidence produced under the old meaning stops being admissible.
+Nothing yet defines how a **legitimate** change to `verification.toml`, a
+declared behavioural specification, or the machinery itself gets through.
+
+That gap is not theoretical, and this PR is the first thing it would catch. The
+v3 implementation changes the policy shape from the v2 tables to the v3 per-gate
+tables (§I), so its baseline definition and its candidate definition necessarily
+differ:
+
+```
+202bf35 baseline          uses v2 policy syntax
+        |
+implementation changes verifier + policy to v3
+        |
+baseline definition != candidate definition
+        |
+v3 correctly refuses silent substitution
+```
+
+**The first correct implementation of v3 rejects itself.** Without an explicit
+governance path it would be forced to invent an exception, inside the system
+built to eliminate invented exceptions.
+
+### L1. A candidate definition never silently replaces the governing one
+
+The baseline record captures the governing definition identity per gate. When an
+input to `definition_sha256` changes during a task, **both identities are
+preserved** rather than one overwriting the other:
+
+```
+governing_definition   <baseline digest>
+candidate_definition   <post-change digest>
+```
+
+Evidence produced under the candidate is labelled `definition: candidate`. It
+does **not** retroactively satisfy the governing definition merely because it
+carries the same gate name. This is the §5 rule — a name is not an identity —
+applied across time rather than across authority.
+
+### L2. An intentional definition change is a governance change
+
+A verification-definition change is its own task class, with its own terminal
+state.
+
+```
+governing == candidate              governing != candidate
+   |                                   |
+CLEAN CLIMB                         candidate evidence may be collected
+   |                                   |
+READY FOR HUMAN GATE                DEFINITION CHANGE PENDING
+   |                                   |
+HUMAN GATE                          HUMAN GATE decides whether the
+                                    candidate becomes governing
+```
+
+**`CLEAN CLIMB` must not print TRUE for a gate satisfied only under a changed
+definition.** The honest machine output is *"I collected evidence under a
+definition you have not yet accepted"*, and that is what
+`DEFINITION CHANGE PENDING` says.
+
+The human gate may accept the change. Only once accepted and merged does the
+candidate become governing **for subsequent tasks**. A definition never governs
+its own introduction.
+
+### L3. Definition identity is gate-scoped
+
+A definition change to `verify-login` must not invalidate `lint`. The composite
+names exactly which required gates changed definition and leaves the rest
+ordinary.
+
+This requires a precision the note has so far left implicit, and L3 does not
+hold without it: **`definition_sha256` is computed over the gate's own
+declaration subtree and its declared specification files — never over the whole
+policy file.** A shared `verification.toml` contributes to every gate's digest
+if hashed wholesale, so editing one gate's command would change all of them and
+collapse L3 immediately.
+
+`policy_sha256` (the whole file) remains, and is a different instrument: it is
+governance provenance, recorded and reported, not the per-gate admissibility
+key.
+
+### L4. Where practical, retain evidence under both definitions
+
+When the governing definition is still runnable, collect both:
+
+```
+verify-login @ governing g1   PASS / FAIL
+verify-login @ candidate  g2   PASS / FAIL
+```
+
+This is most useful when a behavioural specification is being **expanded**: the
+old coverage still holds and the new coverage is additional. The candidate
+result still never substitutes for the governing one automatically.
+
+When the governing definition is intentionally no longer meaningful — the
+feature it describes is gone — say so and leave the decision to the human gate.
+**Do not invent a machine waiver.** A composer that can excuse a definition it
+no longer likes is a composer that can excuse anything.
+
+### L5. The v2 to v3 bootstrap
+
+This repository cannot have captured a `verification.ladder.baseline/1` record
+with a v3 verifier before the v3 verifier existed. That is a genuine
+chicken-and-egg, and it is resolved by naming one immutable baseline rather than
+by relaxing a rule.
+
+**`202bf35` is the migration baseline.** A baseline record may be
+*reconstructed* from an immutable committed state when every input is
+reproducible:
+
+- the exact commit `202bf35`;
+- the policy and specification bytes as committed at that commit;
+- push-CI evidence already held for that exact commit — run
+  [35491283157](https://github.com/Deep-Sixed/Verification-Ladder/actions/runs/35491283157),
+  `push` event;
+- **no dirty pre-mutation state is reconstructed.** A reconstruction can only
+  describe a clean committed tree; anything else would be fabricating a worktree
+  nobody observed.
+
+The reconstructed record carries `origin: "reconstructed"` so it stays visible in
+every composite that references it, never laundered into looking captured. It is
+valid for the migration task alone and is not a general mechanism.
+
+After v3 exists, ordinary tasks capture baseline before mutation, as §F requires.
+
+### L6. Policy syntax migration is a separate layer
+
+Evidence schema compatibility and policy syntax compatibility are different
+questions. **Do not conflate "evidence/v2 is incompatible" with "the v2 policy
+file cannot be read."** The first is about records this verifier produced; the
+second is about a project's committed configuration.
+
+**Preferred: parse the v2 policy form as legacy input and normalize it to v3
+defaults**, then emit only v3 evidence:
+
+```
+[gates.local] name = "cmd"   ->  authority local, target ["repository"],
+                                 evidence_mode execution
+[ci_steps]    name = "step"  ->  authority ci,    target ["repository"],
+                                 evidence_mode execution
+```
+
+Normalization must be **deterministic**, and the normalized form is what feeds
+`definition_sha256`, so that two readers of the same legacy file agree on gate
+identity.
+
+One limit is worth stating rather than discovering: a legacy policy **cannot
+declare a behavioural gate**, because v2 has no syntax for one. Behavioural
+gates require v3 policy. Legacy parsing is a migration affordance for existing
+mechanical gates, not a second supported dialect.
+
+The alternative — a documented one-time migration with no legacy parsing — is
+acceptable, provided it does not pretend the new policy governed its own
+introduction.
+
 ---
 
 ## The schema
@@ -572,6 +730,11 @@ BLOCKED; that behaviour is correct and is retained.)
 
 ## Completion rules
 
+Throughout, *definition matches* means the record's `definition_sha256` equals
+the **governing** definition for that gate — the one captured at baseline (§F,
+§L1). Evidence matching only a candidate definition is admissible evidence
+*about the candidate*, and never satisfies the governing requirement (§L2).
+
 Throughout, *target projection matches* means: the record carries every target
 dimension the gate definition declares, and each of those dimensions equals the
 current target's value for it (§I). Undeclared dimensions are not compared.
@@ -640,7 +803,20 @@ numbering drifted around it.
 CLEAN CLIMB               TRUE
 STATE MATCH               TRUE
 EVIDENCE ADMISSIBLE       TRUE
+DEFINITION CHANGE         NONE
 READY FOR HUMAN GATE      TRUE
+```
+
+On a definition-changing task the same block reports the governance state
+instead, and `CLEAN CLIMB` does not read TRUE on the strength of candidate
+evidence (§L2):
+
+```
+CLEAN CLIMB               FALSE     (verify-login: candidate definition only)
+STATE MATCH               TRUE
+EVIDENCE ADMISSIBLE       TRUE
+DEFINITION CHANGE         PENDING   verify-login  g1 -> g2
+READY FOR HUMAN GATE      TRUE      as a definition change, not as a clean climb
 ```
 
 `OPEN FINDINGS` joins that block only when a ledger exists to support it.
@@ -812,7 +988,8 @@ the general rule.
 Nothing here begins until this note — including decisions I, J and K — is
 committed and reviewed. No evidence behaviour changes before then.
 
-1. **Schema-v3 data model**, parsing and validation.
+1. **Schema-v3 data model**, parsing and validation — including legacy v2
+   policy normalization and the migration baseline (§L5, §L6).
 2. **Target projections** plus repository/index identity.
 3. **Gate definition and authority identity.**
 4. **Symmetric execution/attestation enforcement.**
@@ -821,7 +998,8 @@ committed and reviewed. No evidence behaviour changes before then.
    → commit.
 7. **Verifier compatibility** (§J), plus the INSTALL.md pinned-release
    correction (§E).
-8. **Governing baseline policy and specification binding** (§F).
+8. **Governing baseline policy and specification binding** (§F), plus
+   definition-change governance and `DEFINITION CHANGE PENDING` (§L1-§L4).
 9. **Output and terminology** — `CLEAN CLIMB`, remove `UNRESOLVED FINDINGS`, add
    `READY FOR HUMAN GATE`; correct the `state_id` claim.
 10. **G1 and G2** — `run --gate` must load policy; artifact paths excluded from
@@ -858,7 +1036,18 @@ Write these failing first. Composition must reject:
     gate, or carrying a different projection;
 18. an execution record whose recomputed `record_id` differs from the stored
     one;
-19. a behavioural execution with no corresponding artifact-bound attestation.
+19. a behavioural execution with no corresponding artifact-bound attestation;
+20. a changed declared gate specification yielding a silent PASS rather than
+    `DEFINITION CHANGE PENDING`;
+21. candidate-definition evidence satisfying the governing definition;
+22. a definition change to one gate invalidating an unrelated unchanged gate —
+    `lint` must remain admissible while `verify-login` changes definition (§L3);
+23. a candidate definition failing to govern normally once it is the *next*
+    task's baseline;
+24. non-deterministic normalization of the v2 policy form, if legacy parsing is
+    adopted (§L6);
+25. a reconstructed baseline that is not marked `origin: "reconstructed"`, or
+    one reconstructed from a dirty rather than a committed state (§L5).
 
 Distinguished from the above, and asserted separately: an unreachable runtime
 yields **BLOCKED**, not a state mismatch.
