@@ -521,6 +521,58 @@ def projection_status(record_target: dict, dimensions, current_target: dict) -> 
     return ADMISSIBLE, None
 
 
+def definition_status(claimed: dict, governing: dict) -> tuple[str, str | None]:
+    """Whether a record's gate identity is the one currently in force.
+
+    A gate name is not a gate identity. Evidence carries the digest of the
+    definition it was produced under; if the governing definition has moved, the
+    gate did pass, under a meaning no longer in force. That is INADMISSIBLE
+    rather than a failure - nothing is wrong with the code, and nothing about it
+    has been established either.
+    """
+    name = claimed.get("gate")
+    if name not in governing:
+        return INADMISSIBLE, f"{name!r} is not a gate this policy declares"
+    current = governing[name]
+    if claimed.get("definition_sha256") != current["definition_sha256"]:
+        return INADMISSIBLE, (f"{name!r} was established under definition "
+                              f"{str(claimed.get('definition_sha256'))[:19]}…, the policy now declares "
+                              f"{current['definition_sha256'][:19]}…; re-verify under the definition in force")
+    return ADMISSIBLE, None
+
+
+def authority_status(name: str, authority: str, governing: dict) -> tuple[str, str | None]:
+    """Whether this authority is one the policy lets establish this gate.
+
+    The gate whose only permitted authority is `ci` is the one a local command
+    must never satisfy: a container build or a second interpreter that this
+    checkout cannot run is exactly what a CI-only gate is for, and a local no-op
+    wearing its name establishes nothing.
+    """
+    if name not in governing:
+        return INADMISSIBLE, f"{name!r} is not a gate this policy declares"
+    permitted = governing[name]["permitted_authorities"]
+    if authority not in permitted:
+        return INADMISSIBLE, (f"{name!r} may be established by {', '.join(permitted)}, not by "
+                              f"{authority!r}; authority is declared, never assumed")
+    return ADMISSIBLE, None
+
+
+def gate_admissibility(row: dict, governing: dict, current_target: dict) -> tuple[str, str | None]:
+    """Everything that must agree before a row is read as evidence about this target.
+
+    Definition, then authority, then projection - in that order, because a row
+    whose definition has moved is not evidence whose authority is worth checking.
+    Each fails closed with what to do about it.
+    """
+    for status, reason in (definition_status(row, governing),
+                           authority_status(row.get("gate"), row.get("authority"), governing)):
+        if status != ADMISSIBLE:
+            return status, reason
+    return projection_status(row.get("target_state") or {},
+                             governing[row["gate"]]["target"], current_target)
+
+
 def load_json(path: Path) -> dict:
     try:
         return json.loads(path.read_text())
