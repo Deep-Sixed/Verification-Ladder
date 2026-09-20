@@ -99,7 +99,10 @@ def test_pass_binds_to_the_state_that_produced_it(repo):
     code, record = record_of(repo, ("unit", PASS_GATE))
     assert code == 0
     assert record["verdict"] == "PASS"
-    assert record["repository"]["state_id"] == verify.state_id(repo)
+    # Compared under the exclusion the tool itself applies. Shadow emission writes
+    # into .verification/, which `relative_inside` excludes whole; a raw state_id
+    # here would be measuring the evidence directory rather than the checkout.
+    assert record["repository"]["state_id"] == verify.state_id(repo, verify.relative_inside(repo, []))
     assert record["repository"]["head"] == verify.head_sha(repo)
     assert record["gate_set"] == "custom"
 

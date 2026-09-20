@@ -841,6 +841,93 @@ def governance_status(baseline: dict, candidate: dict, rows: list[dict]) -> tupl
     return DEFINITION_PENDING, [f"{name}: candidate definition only" for name in under_candidate] or changed
 
 
+def shadow_gate(repo: Path, result: dict, definitions: dict) -> dict:
+    """One gate's evidence/3 row, built from the v2 execution that already happened.
+
+    From the result, never from a second run. Re-executing to manufacture the v3
+    half would make the two records describe two executions, and shadow mode would
+    then be comparing the verifier against itself on different evidence.
+    """
+    name = result["name"]
+    row = {"gate": name, "kind": result["kind"], "status": result["status"]}
+    known = definitions.get(name)
+    if known:
+        row |= {"definition_sha256": known["definition_sha256"],
+                "permitted_authorities": known["permitted_authorities"],
+                "target": known["target"], "evidence_mode": known["evidence_mode"]}
+    else:
+        # A gate the policy does not declare - a custom --gate. It gets no
+        # definition identity, because it has none: that is the point of §5.
+        row["definition"] = "undeclared"
+    for field in ("exit_code", "reason", "step", "artifacts"):
+        if field in result:
+            row[field] = result[field]
+    row["record_id"] = record_id(row)
+    return row
+
+
+def shadow_record(repo: Path, declared: dict, results: list[dict], authority: str,
+                  target_state: dict, **extra) -> dict:
+    """The evidence/3 view of an execution that has already been recorded as v2.
+
+    §M1: this record has no authority. It is written so the construction path runs
+    against real executions before anything depends on it, and nothing reads it
+    back - there is no v3 composer until §M2.
+    """
+    definitions = gate_definitions(repo, declared)
+    return {
+        "schema": SCHEMA_V3,
+        "shadow": True,
+        "authority": authority,
+        "recorded_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "verifier": verifier_identity(),
+        "target_state": target_state,
+        "verification_spec": {"policy_sha256": digest_of(declared)},
+        "gates": [shadow_gate(repo, result, definitions) for result in results],
+        **extra,
+    }
+
+
+def emit_shadow(repo: Path, output: Path | None, build) -> None:
+    """Write a shadow record beside an authoritative one, or say why it could not be.
+
+    Every failure here is contained. A task whose v2 gates passed does not fail
+    because the v3 construction path could not build a record for them - that
+    would make shadow mode more dangerous than the thing it exists to de-risk -
+    but it is never silent either, because an unbuilt shadow record that nobody
+    notices defeats the whole stage.
+    """
+    destination = (output.parent if output else repo / EVIDENCE_DIR) / SHADOW_DIR
+    name = (output.stem if output else "record") + ".v3.json"
+    try:
+        record = build()
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / name).write_text(json.dumps(record, indent=2) + "\n")
+    except SystemExit as refusal:
+        print(f"  shadow   not constructed: the evidence/3 path refused this execution "
+              f"(exit {refusal.code}); the result above is unaffected", file=sys.stderr)
+    except Exception as error:  # noqa: BLE001 - a shadow failure must never fail the task
+        print(f"  shadow   not constructed: {type(error).__name__}: {error}; "
+              f"the result above is unaffected", file=sys.stderr)
+    else:
+        print(f"  shadow   {destination / name} (evidence/3, no authority)", file=sys.stderr)
+
+
+def load_shadow_record(path: Path) -> dict:
+    """Read a shadow record, refusing anything that is not one.
+
+    The mirror of `load_record`, and the reason both exist: neither
+    representation can be fed to the other's reader. There is no v3 composer yet,
+    so nothing calls this in anger - it is the boundary, stated.
+    """
+    record = load_json(path)
+    if record.get("schema") != SCHEMA_V3:
+        raise blocked(f"{path}: not a {SCHEMA_V3} record")
+    if not record.get("shadow"):
+        raise blocked(f"{path}: not a shadow record; evidence/3 is not authoritative (see §M)")
+    return record
+
+
 def load_json(path: Path) -> dict:
     try:
         return json.loads(path.read_text())
@@ -856,6 +943,11 @@ def load_record(path: Path) -> dict:
 
 
 EVIDENCE_DIR = ".verification"
+# Shadow records live in their own subdirectory of the evidence directory, so the
+# documented `compose .verification/*.json` cannot reach them - a glob that swept
+# them in would be the accidental consumption §M1 forbids, and would fail on the
+# schema check rather than being refused for what it is.
+SHADOW_DIR = "shadow"
 
 
 def relative_inside(repo: Path, paths) -> frozenset[str]:
@@ -971,6 +1063,13 @@ def command_run(args) -> int:
         record["drift_paths"] = sorted({path for _, path in before_paths ^ state_paths(repo, exclude)})
     emit(record, output)
     summarize(record, output, file=sys.stderr)
+    # After the authoritative record is written and its verdict is fixed. The
+    # shadow record describes the same `results`, so no gate runs twice, and
+    # nothing below can change what was just reported.
+    emit_shadow(repo, output, lambda: shadow_record(
+        repo, declared, results, "local",
+        {"repository": repository_identity(repo, exclude)},
+        drift=drift, gate_set=record["gate_set"]))
     return EXIT[record["verdict"]]
 
 
@@ -1061,6 +1160,13 @@ def command_import_ci(args) -> int:
     output = Path(args.output).resolve() if args.output else None
     emit(record, output)
     summarize(record, output, file=sys.stderr)
+    emit_shadow(repo, output, lambda: shadow_record(
+        repo, declared, gates, "ci",
+        {"repository": {"head": sha, "index_state": None, "worktree_state": clean_state_id(sha)}},
+        source={"repository": (run.get("repository") or {}).get("full_name"),
+                "run_id": run.get("id"), "run_attempt": run.get("run_attempt"),
+                "workflow": run.get("path"), "job": job.get("name"),
+                "job_run_id": job.get("run_id"), "event": event, "head_sha": sha}))
     return EXIT[record["verdict"]]
 
 

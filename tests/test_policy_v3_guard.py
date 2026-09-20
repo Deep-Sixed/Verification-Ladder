@@ -42,7 +42,7 @@ def test_a_v2_policy_is_untouched_by_the_guard(repo):
     (repo / "verification.toml").write_text(V2_POLICY)
     code, output = run(repo, "run", "--output", str(repo / ".verification" / "r.json"))
     assert code == 0, output
-    assert "evidence/3" not in output
+    assert "not yet authoritative" not in output, "the guard must not fire on a v2 policy"
 
 
 @pytest.mark.parametrize(
