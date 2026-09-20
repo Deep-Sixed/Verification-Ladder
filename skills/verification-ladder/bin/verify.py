@@ -573,6 +573,83 @@ def gate_admissibility(row: dict, governing: dict, current_target: dict) -> tupl
                              governing[row["gate"]]["target"], current_target)
 
 
+def kind_status(row: dict, governing: dict, judgment_rungs) -> tuple[str, str | None]:
+    """What kind of evidence a requirement takes, enforced in both directions.
+
+    v2 enforced one direction only: an attestation could not satisfy a required
+    gate. The converse was unguarded, so an execution named `diff` satisfied the
+    diff judgment rung - `--gate diff="true"` was a passing judgment. A machine
+    cannot hold an opinion about a diff, and an agent cannot run a container
+    build. Neither may stand in for the other.
+    """
+    name, kind = row.get("gate"), row.get("kind")
+    if name in judgment_rungs:
+        if kind != ATTESTATION:
+            return INADMISSIBLE, (f"{name!r} is a judgment rung and takes an attestation; an "
+                                  f"{kind} establishes that something ran, not that anyone read it")
+        return ADMISSIBLE, None
+    if name not in governing:
+        return INADMISSIBLE, f"{name!r} is not a gate this policy declares"
+    if kind != EXECUTION:
+        return INADMISSIBLE, (f"{name!r} must be established by execution; attested, never executed")
+    return ADMISSIBLE, None
+
+
+def behavioural_status(row: dict, governing: dict, rows: list[dict], repo: Path) -> tuple[str, str | None]:
+    """An `execution+attestation` gate needs both halves, bound to the same bytes.
+
+    The execution establishes that the real path ran; the attestation establishes
+    that someone read what it produced. Neither absorbs the other, so the
+    attestation names the execution it judged and the artifacts it judged, and
+    every digest is recomputed from the file rather than compared against another
+    record's copy of it. Two strings agreeing with each other is not a check.
+    """
+    name = row["gate"]
+    if governing[name]["evidence_mode"] != "execution+attestation":
+        return ADMISSIBLE, None
+    if row.get("kind") != EXECUTION:
+        return ADMISSIBLE, None
+    artifacts = row.get("artifacts") or []
+    if not artifacts:
+        return INADMISSIBLE, f"{name!r} is a behavioural gate and established no artifacts to be judged"
+    for artifact in artifacts:
+        location = repo / artifact["path"]
+        try:
+            body = location.read_bytes()
+        except OSError:
+            return INADMISSIBLE, f"{name!r} references {artifact['path']!r}, which is not on disk"
+        if "sha256:" + hashlib.sha256(body).hexdigest() != artifact["sha256"]:
+            return INADMISSIBLE, (f"{name!r} references {artifact['path']!r}, whose bytes have changed "
+                                  f"since the execution recorded them")
+    recomputed = record_id(row)
+    if row.get("record_id") != recomputed:
+        return INADMISSIBLE, f"{name!r}: stored record_id does not match the record it identifies"
+    digests = {artifact["sha256"] for artifact in artifacts}
+    for candidate in rows:
+        if candidate.get("kind") != ATTESTATION or candidate.get("gate") != name:
+            continue
+        if candidate.get("execution_ref") != recomputed:
+            continue
+        if set(candidate.get("artifact_refs") or []) != digests:
+            return INADMISSIBLE, (f"{name!r}: its attestation judged a different set of artifacts "
+                                  f"than the execution produced")
+        if candidate.get("target_state") != row.get("target_state"):
+            return INADMISSIBLE, f"{name!r}: its attestation was made against a different target"
+        return ADMISSIBLE, None
+    return INADMISSIBLE, (f"{name!r} ran and produced artifacts, but nothing attests to what they show; "
+                          f"an execution establishes that a path ran, not that it was correct")
+
+
+def record_id(row: dict) -> str:
+    """A row's identity, over its canonical form with the stored id left out.
+
+    Stored as a locator and recomputed wherever it is used: an attestation that
+    names an execution must name one that exists as recorded, or the reference
+    identifies nothing.
+    """
+    return digest_of({k: v for k, v in row.items() if k != "record_id"})
+
+
 def load_json(path: Path) -> dict:
     try:
         return json.loads(path.read_text())
