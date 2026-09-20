@@ -24,21 +24,31 @@ ln -s ~/src/verification-ladder/skills/verification-ladder ~/.claude/skills/veri
 A linked skill is available in every repository, and `git pull` in the clone
 updates every agent at once.
 
-**Check out a release tag rather than tracking `main`.** Evidence records will
-carry the verifier's compatibility contract, and composition will require every
-record in one composite to share it. A clone that moves under the agent changes
-the rules mid-task: records taken before the pull and after it can stop
-composing, for a reason that has nothing to do with the code under verification.
-Updating every agent at once is still the point — make it a deliberate step:
+The skill's own directory is reported to the agent when the skill loads, which
+is how it finds `bin/verify.py`.
+
+### Pin the revision you install
+
+**Do not leave the clone tracking a branch.** Evidence records will carry the
+verifier's compatibility contract, and composition will require every record in
+one composite to share it. A clone that moves under the agent changes the rules
+mid-task: records taken before a `git pull` and after it can stop composing, for
+a reason that has nothing to do with the code under verification.
+
+**There are no release tags yet**, so pin the commit you intend to run:
 
 ```sh
-git -C ~/src/verification-ladder fetch --tags
-git -C ~/src/verification-ladder checkout v0.1.0   # the release you intend
+git -C ~/src/verification-ladder fetch origin
+git -C ~/src/verification-ladder checkout --detach <commit>
+git -C ~/src/verification-ladder rev-parse HEAD    # record this; evidence will name it
 ```
 
-Re-verify anything in flight after an upgrade that changes evidence semantics;
-the release notes say when that is. The skill's own directory is reported to the agent
-when the skill loads, which is how it finds `bin/verify.py`.
+When releases are cut, a tag becomes the thing to pin and this reads
+`checkout v<version>` instead. Until then a branch name is not a pin, and
+`main` is not a stable one — it is simply a branch that has moved less.
+
+Upgrading stays deliberate: fetch, read what changed, check out the new commit,
+and re-verify anything in flight if evidence semantics moved.
 
 ## Codex — not yet verified
 

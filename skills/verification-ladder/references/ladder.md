@@ -1,8 +1,10 @@
 # The Verification Ladder, rung by rung
 
-Each rung states its question, how to answer it, what counts as evidence, and
-what a finding at that rung means. Climb in order; a rung is only attempted once
-the rungs beneath it hold.
+Nine rungs, climbed in order after the work exists; a rung is only attempted
+once the rungs beneath it hold. Each states its question, how to answer it, what
+counts as evidence, and what a finding at that rung means. The baseline below is
+a precondition rather than a rung - it is captured before the change, so it
+cannot be climbed to.
 
 The commands are the project's, not this document's. `verification.toml` (or
 `[tool.verification]` in `pyproject.toml`) names the gates under `[gates.local]`
@@ -10,7 +12,11 @@ and maps each CI-only gate to the workflow step that establishes it. Read that
 file first: it is the only place that knows how this project is built and
 checked.
 
-## Rung 0 - Baseline
+## Baseline - a precondition, not a rung
+
+Captured **before** the change, which is what keeps it out of the ladder's
+numbering: the nine rungs below are climbed after the work exists, and this
+cannot be. A task that has already mutated the tree has no baseline left to take.
 
 **Question.** What exact state am I verifying, and was it green before I touched it?
 

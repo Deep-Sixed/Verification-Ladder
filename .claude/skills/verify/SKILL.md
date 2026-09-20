@@ -112,5 +112,14 @@ a reachability result.
   the next one. Three verification passes have produced three measurement errors
   and this was one of them, through a `bash -c` wrapper whose final statement was
   a `cp` restoring a file.
+- **Before treating a probe result as evidence, establish that the probe could
+  have failed.** A probe whose failure mechanism is inert in this environment
+  proves nothing by succeeding: `chmod 500` to test a write refusal establishes
+  nothing when the process is root, and a green result there means the check
+  never ran, not that the property holds. Where practical, drive the control path
+  first — make the probe fail on purpose, see it fail, then test the real case.
+  This is a different failure class from the exit-status rule above: that one
+  captures the wrong status, this one captures the right status from a check with
+  no discriminating power.
 - `compose` needs every record to agree on one state. Two state ids for one
   unchanged commit almost always means an untracked file appeared mid-workflow.

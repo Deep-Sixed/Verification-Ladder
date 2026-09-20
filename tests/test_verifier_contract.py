@@ -7,6 +7,8 @@ earlier evidence.
 """
 
 import importlib.util
+import re
+import subprocess
 from pathlib import Path
 from pathlib import Path as _P
 
@@ -61,8 +63,25 @@ def test_the_contract_is_not_the_schema():
     assert identity["compatibility"] == verify.COMPATIBILITY
 
 
-def test_install_recommends_a_pinned_release_not_a_moving_clone():
-    """Exact verifier binding makes a clone that tracks main a moving part under the evidence."""
+def test_install_tells_users_to_pin_the_revision_they_run():
+    """Exact verifier binding makes a clone that tracks a branch a moving part."""
     install = (_P(__file__).resolve().parents[1] / "INSTALL.md").read_text()
-    assert "release tag rather than tracking `main`" in install
-    assert "checkout v" in install
+    assert "Pin the revision you install" in install
+    assert "checkout --detach" in install
+
+
+def test_install_never_names_a_ref_this_repository_does_not_have():
+    """The original bug: the guide said `checkout v0.1.0` and no tag existed.
+
+    Following an install guide should not fail at the install step. Any version
+    ref the guide tells a user to check out must be one this repository can
+    resolve, so the guide cannot get ahead of the releases that back it.
+    """
+    root = _P(__file__).resolve().parents[1]
+    install = (root / "INSTALL.md").read_text()
+    named = set(re.findall(r"checkout\s+(v[0-9][^\s`]*)", install))
+    if not named:
+        return
+    tags = set(subprocess.run(["git", "tag", "-l"], cwd=root, capture_output=True, text=True,
+                              check=True).stdout.split())
+    assert named <= tags, f"INSTALL.md names {sorted(named - tags)}, which this repository has no tag for"

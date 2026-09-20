@@ -51,9 +51,13 @@ Climb in order. Each rung asks a broader question than the one below it, and a
 rung is not attempted until the rungs beneath it hold. `references/ladder.md`
 has the per-rung procedure.
 
+Before any of them, capture the **baseline**: what exact state am I verifying,
+and was it green before I started? HEAD, worktree status and a gate run on the
+cold checkout. It is a precondition and not a rung, because it has to be taken
+before the change exists.
+
 | Rung | Question | Primary evidence |
 |------|----------|------------------|
-| 0 Baseline | What exact state am I verifying, and was it green before I started? | HEAD, worktree status, a baseline gate run |
 | 1 Task | Did I implement what was actually requested? | The request, read again, against the diff |
 | 2 Mechanical | Do the project's gates pass? | `verify.py run` record |
 | 3 Diff | Did I change only what I intended? | The full diff, read |
@@ -97,7 +101,9 @@ The loop must end, and it must not end by fatigue.
   can run it does.
 - A finding needs a decision that is not yours (product behavior, a breaking
   interface change, anything destructive or outward-facing) → stop and ask.
-- Rungs 0-9 hold with no open findings → COMPLETE, with evidence attached.
+- Rungs 1-9 hold over the captured baseline, with no open findings → the
+  composite reads `CLEAN CLIMB TRUE` and `READY FOR HUMAN GATE TRUE`. That is
+  readiness for a person to accept, not acceptance.
 
 Never reach for green by weakening the check: do not skip, `xfail`, delete or
 loosen a test, do not widen a lint ignore, do not narrow a test selection to the
