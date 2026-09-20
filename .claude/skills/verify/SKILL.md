@@ -85,6 +85,34 @@ The event must be `push`. A `pull_request` run checks out a synthetic merge and
 - **Malformed input.** `--gate lint=`, `--gate noequals`, a missing record, a
   non-repository `--repo` — each has its own message and exits 2.
 
+## The evidence/3 shadow surfaces
+
+`run`, `attest` and `import-ci` each write an evidence/3 shadow beside their
+authoritative record, under `.verification/shadow/`. Three further commands read
+them and decide nothing:
+
+```sh
+python3 "$V" baseline                                    # definitions, before the task
+python3 "$V" attest --rung verify-login --note "watched it"     --execution .verification/local.json                 # binds judgment to execution
+python3 "$V" compare .verification/local.json     --attestations .verification/attestations.json
+python3 "$V" qualify .verification/*.json
+```
+
+`compare` exits 0 agree / 1 disagree / 2 not comparable; `qualify` adds
+`UNCOVERED` for a predicate nothing reached. Neither touches a verdict.
+
+To exercise behavioural gates, the runtime dimension or artifacts, the consumer
+policy needs a `[shadow]` layer - `templates/verification.toml` carries a
+commented example of all three. Two traps worth knowing:
+
+- A gate named under `[shadow.gates.*]` is described ENTIRELY there. Its
+  `[gates.local]` entry is dropped from the evidence/3 view, so declaring the
+  same gate under two shadow blocks means repeating `target` and
+  `evidence_mode` identically in both, or normalization refuses it.
+- `--gate NAME=COMMAND` forges nothing when the command it runs is the one the
+  policy declares. `--gate tests=true` against `[gates.local] tests = "true"`
+  is admissible and correctly so. Use a command that differs.
+
 ## Measuring what the CLI actually reaches
 
 Much of `verify.py` is the evidence/3 model, which is deliberately not wired to

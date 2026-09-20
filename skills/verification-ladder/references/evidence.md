@@ -185,3 +185,43 @@ A required gate that cannot run here is not waived; it stays BLOCKED until an
 authority that can run it does. There is no field for waiving a gate, and that
 is deliberate - the only ways to clear one are to run it, to import a run that
 did, or to change the committed policy in a reviewed change.
+
+## Shadow mode
+
+Everything above is `verification.ladder.evidence/2`, and it is what decides.
+Beside each record the CLI also writes an `evidence/3` shadow, built from the
+same execution rather than a second one, under
+`.verification/shadow/<name>.v3.json`. Nothing reads it to decide anything, and
+`compose .verification/*.json` cannot reach it.
+
+A repository may describe how its executions read under evidence/3 in a
+`[shadow]` policy layer. That layer declares nothing authoritative: it cannot
+run a command, satisfy a required gate, or change a verdict or exit code, and a
+gate only it declares stays unpaired rather than becoming executable. Delete the
+section and no result changes.
+
+Three commands work on that layer, and none of them decides anything:
+
+```sh
+python "$VERIFY" baseline                     # what the gates mean, before the task
+python "$VERIFY" run --output .verification/local.json
+python "$VERIFY" attest --rung verify-login --note "watched the journey" \
+    --execution .verification/local.json      # binds the judgment to what it judged
+python "$VERIFY" compare .verification/local.json \
+    --attestations .verification/attestations.json
+python "$VERIFY" qualify .verification/local.json .verification/ci.json \
+    .verification/attestations.json
+```
+
+`compare` reports, per predicate, whether the evidence/3 reading of an execution
+agrees with the execution, could not be compared, or does not apply. `qualify`
+asks the other question: did anything in this evidence set reach each predicate
+at all? A predicate nobody evaluated reads exactly like one that passed unless
+the report keeps them apart, so `qualify` has a fourth outcome, `UNCOVERED`.
+
+`--execution` on `attest` affects the shadow alone; the authoritative
+attestation is byte-identical with it and without it. A `baseline` is never a
+prerequisite: its absence reports `N/A` and changes nothing.
+
+See `docs/design/evidence-v3.md` §M for what each stage must establish before
+the next, and §M4 for why the authority switch is its own review point.

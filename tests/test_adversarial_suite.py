@@ -258,9 +258,20 @@ def test_an_uninterrogable_runtime_is_blocked_not_stale():
 
 @pytest.mark.skip(reason="blocked on a findings ledger (design note decision H)")
 def test_a_clean_result_while_a_tracked_finding_remains_open():
+    """M3 did not supply this. Its qualification report tracks predicates the
+    VERIFIER exercised; decision H's ledger tracks findings an AGENT discovered
+    while climbing. Different objects, and the second still does not exist -
+    see tests/test_shadow_qualification.py::test_qualification_is_not_a_findings_ledger.
+    """
     raise AssertionError
 
 
 @pytest.mark.skip(reason="blocked on evidence/3 activation; the CLI still emits evidence/2")
 def test_the_cli_refuses_to_report_ready_when_no_gate_actually_ran():
+    """Still blocked, and checked rather than assumed. The evidence/3 path now
+    refuses every leg of the replay through the shadow surfaces, but v2 remains
+    authoritative and still reports READY FOR HUMAN GATE TRUE for it -
+    tests/test_shadow_qualification.py::test_the_v2_composer_still_accepts_the_forgery
+    runs that and will start failing at M4, which is when this can be written.
+    """
     raise AssertionError

@@ -160,8 +160,10 @@ def test_a_v2_attestation_cannot_satisfy_an_execution_requirement(repo):
     attested(repo, rung="unit", note="looks fine to me")
     code, output = cli(repo, "compare", str(judgments(repo)))
     assert code == 1
-    assert "attested, never executed" in output
-    assert "may be established by local, not by 'agent'" in output
+    assert "attested, never executed" in output, "the kind requirement is what refuses this"
+    assert "N/A             unit             authority" in output, (
+        "permitted authorities say who may EXECUTE a gate; asking whether the agent may "
+        "would refuse every honest judgment as well as this one")
 
 
 def test_a_v3_shadow_attestation_cannot_satisfy_a_v2_gate(repo):

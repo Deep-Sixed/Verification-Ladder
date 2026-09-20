@@ -96,10 +96,17 @@ real project ([Cerberus](https://github.com/Deep-Sixed/Cerberus)), which is now 
 consumer of this repository rather than the owner of the skill. This repository
 verifies itself with its own ladder on every change.
 
-The evidence model is being revised. [`docs/design/evidence-v3.md`](docs/design/evidence-v3.md) is a design note
-fixing the shape of `verification.ladder.evidence/3`, under which a result is
-admissible only when its definition, permitted authority, execution provenance,
-target state, proof artifacts and verifier identity all refer to the same thing.
-It is a design note only; none of it is implemented yet.
+The evidence model is being revised. [`docs/design/evidence-v3.md`](docs/design/evidence-v3.md) fixes the shape of
+`verification.ladder.evidence/3`, under which a result is admissible only when
+its definition, permitted authority, execution provenance, target state, proof
+artifacts and verifier identity all refer to the same thing.
+
+**The model is implemented; it is not authoritative.** Records on disk are
+`evidence/2`, `compose` applies v2 rules, and every verdict and exit code the
+CLI produces is v2's. Beside each authoritative record the CLI writes an
+evidence/3 shadow, and `compare` and `qualify` report how the v3 reading of the
+same execution differs from it. A disagreement there is a finding about the
+verifier, never about the change. Activation is staged (§M) and the switch is
+its own review point.
 
 MIT licensed; see `LICENSE`.

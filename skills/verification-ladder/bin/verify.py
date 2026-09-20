@@ -13,7 +13,16 @@ commands that satisfy it, come from that repository's own committed policy.
     python scripts/verify.py import-ci --run RUN.json --job JOB.json [--output PATH]
     python scripts/verify.py compose PATH... [--output PATH]
     python scripts/verify.py check PATH
-    python scripts/verify.py compare PATH          # diagnostic; decides nothing
+    python scripts/verify.py baseline [--origin captured|reconstructed]
+    python scripts/verify.py compare PATH [--attestations PATH]
+    python scripts/verify.py qualify PATH... [--output PATH]
+
+The last three belong to the staged evidence/3 activation in
+`docs/design/evidence-v3.md` §M. They decide nothing: `baseline` records what
+the gates mean before a task changes them, `compare` reports how the evidence/3
+reading of an execution differs from the execution, and `qualify` reports
+whether this evidence set exercised everything evidence/3 would enforce. None of
+them touches a verdict, an exit code or a composite.
 
 A gate result is evidence for one repository state and nothing else, so every
 record carries a state id taken over HEAD plus the working tree. `check` refuses
@@ -78,6 +87,28 @@ DEFINITION_UNCHANGED, DEFINITION_PENDING = "NONE", "PENDING"
 # could be compared at all, and collapsing them would hide the cases that matter
 # most - a predicate nobody could evaluate reads exactly like one that passed.
 AGREE, DISAGREE, NOT_COMPARABLE, NOT_APPLICABLE = "AGREE", "DISAGREE", "NOT COMPARABLE", "N/A"
+# §M3 qualification outcomes. UNCOVERED is the one M2 had no way to report, and
+# the one that matters: a predicate nobody evaluated reads exactly like one that
+# passed unless the report keeps them apart.
+QUALIFIED, DISAGREEMENT, UNCOVERED = "QUALIFIED", "DISAGREEMENT", "UNCOVERED"
+# What M4 would switch authority over, and the predicate that carries each. M4
+# may take authority only over semantics this list has seen exercised; anything
+# first exercised at M4 is not qualified.
+M4_CONTRACT = (
+    ("outcome", "the evidence/3 reading of a gate result is the executed one"),
+    ("kind", "execution and judgment stay distinct"),
+    ("kind requirement", "kind_status: each requirement takes its own kind of evidence"),
+    ("definition", "definition_status: a gate name is not a gate identity"),
+    ("authority", "authority_status: authority is declared, never assumed"),
+    ("projection binding", "target_projection: a row's projection is its own record's target"),
+    ("target projection", "projection_status: declared dimensions, no more and no fewer"),
+    ("artifact chain", "behavioural_status: execution and judgment over one set of bytes"),
+    ("admissibility (aggregate)", "gate_admissibility: agrees with the predicates it composes"),
+    ("verifier contract", "verifier_status: records compose under one set of rules"),
+    ("governance", "governance_status: the definitions in force are the baseline's"),
+    ("ci provenance", "ci_provenance_status: repository, run, attempt, workflow, job, commit"),
+    ("ci step", "ci_step_status: what the step actually concluded"),
+)
 # An index holding exactly what HEAD holds. Named, not digested: see `index_state`.
 CLEAN_INDEX = "index:clean"
 # Keys that only an evidence/3 per-gate declaration carries. Their presence is
@@ -561,6 +592,12 @@ def gate_definition(repo: Path, name: str, gate: dict) -> dict:
             "target": gate["target"],
             "evidence_mode": gate["evidence_mode"],
             "permitted_authorities": sorted(gate["authorities"]),
+            # What each authority actually declared it would run. A gate name is
+            # not a gate identity: `--gate lint=true` produces a row named lint,
+            # and stamping it with the policy's definition because the name
+            # matched is the forgery §5 is about.
+            "invocations": {authority: entry.get("command") or entry.get("driver") or entry.get("step")
+                            for authority, entry in gate["authorities"].items()},
             # Declared artifact paths, carried so a record can digest what this
             # gate said it would produce. Paths are part of `declaration` and so
             # already fold into the digest below; repeating them here is a
@@ -980,7 +1017,7 @@ def governance_status(baseline: dict, candidate: dict, rows: list[dict]) -> tupl
 
 
 def shadow_gate(repo: Path, result: dict, definitions: dict, target_state: dict,
-                judgments=()) -> dict:
+                judgments=(), authority: str = "local") -> dict:
     """One gate's evidence/3 row, built from the v2 execution that already happened.
 
     From the result, never from a second run. Re-executing to manufacture the v3
@@ -995,18 +1032,23 @@ def shadow_gate(repo: Path, result: dict, definitions: dict, target_state: dict,
     name = result["name"]
     row = {"gate": name, "kind": result["kind"], "status": result["status"]}
     known = definitions.get(name)
-    if known:
+    invoked = result.get("command") or result.get("step")
+    if name in judgments:
+        # A judgment rung is not a gate and has no gate definition. It is still
+        # about a repository state, and must expire with it.
+        row |= {"definition": "judgment rung", "target": ["repository"],
+                "target_projection": target_projection(target_state, ["repository"])}
+    elif known and known["invocations"].get(authority) != invoked:
+        # The name is declared; what ran is not what the declaration says. The
+        # row gets no definition identity, because it was produced under none.
+        row |= {"definition": "undeclared", "executed_as": invoked}
+    elif known:
         row |= {"definition_sha256": known["definition_sha256"],
                 "permitted_authorities": known["permitted_authorities"],
                 "target": known["target"], "evidence_mode": known["evidence_mode"],
                 "target_projection": target_projection(target_state, known["target"])}
         if known["artifacts"] and result["kind"] == EXECUTION:
             row["artifacts"] = gate_artifacts(repo, known)
-    elif name in judgments:
-        # A judgment rung is not a gate and has no gate definition. Saying
-        # "undeclared" here would read as a custom gate sneaking past the policy,
-        # which is a different thing entirely.
-        row["definition"] = "judgment rung"
     else:
         # A gate the policy does not declare - a custom --gate. It gets no
         # definition identity, because it has none: that is the point of §5.
@@ -1050,7 +1092,7 @@ def shadow_record(repo: Path, declared: dict, results: list[dict], authority: st
         "verifier": verifier_identity(),
         "target_state": target_state,
         "verification_spec": {"policy_sha256": digest_of(declared)},
-        "gates": [shadow_gate(repo, result, definitions, target_state, judgments)
+        "gates": [shadow_gate(repo, result, definitions, target_state, judgments, authority)
                   for result in results],
         **extra,
     }
@@ -1244,6 +1286,8 @@ def compare_gate(repo: Path, executed: dict, derived: dict, authority: str, gove
     the gate. Record-scoped facts are passed beside the row instead.
     """
     name = executed["name"]
+    declared = name in governing
+    judgment = name in judgments
     rows = []
 
     rows.append(_row(name, "outcome", AGREE if executed["status"] == derived["status"] else DISAGREE,
@@ -1253,42 +1297,66 @@ def compare_gate(repo: Path, executed: dict, derived: dict, authority: str, gove
                      executed["kind"], derived["kind"],
                      "an execution read as a judgment, or the reverse, would satisfy the wrong requirement"))
 
-    if name in judgments:
-        # A judgment rung is not a gate. It has no definition and no authority by
-        # design, so those predicates do not apply rather than failing to be
-        # evaluated - reporting NOT COMPARABLE here would say the verifier could
-        # not answer a question nobody asked.
+    # Before anything else that depends on the gate being declared. An execution
+    # wearing a judgment rung's name is caught here and nowhere else, so an early
+    # return above this line would lose the predicate that catches it.
+    status, reason = kind_status({"gate": name, "kind": derived["kind"]}, governing, judgments)
+    rows.append(_row(name, "kind requirement", AGREE if status == ADMISSIBLE else DISAGREE,
+                     derived["kind"],
+                     "attestation" if judgment else
+                     (governing[name]["evidence_mode"] if declared else "no such requirement"),
+                     reason or "the requirement takes the kind of evidence it takes"))
+
+    if judgment:
         rows.append(_row(name, "definition", NOT_APPLICABLE, None, derived.get("definition"),
                          "a judgment rung is not a gate and carries no gate definition"))
         rows.append(_row(name, "authority", NOT_APPLICABLE, executed.get("kind"), None,
                          "a judgment rung is established by the agent that attests it"))
-        return rows
-    if name not in governing:
+        declared_target = ["repository"]
+    elif not declared:
         rows.append(_row(name, "definition", NOT_COMPARABLE, "undeclared", derived.get("definition"),
                          "the policy declares no such gate, so there is no definition to bind to"))
         rows.append(_row(name, "authority", NOT_COMPARABLE, executed.get("command"), None,
                          "authority is declared per gate; an undeclared gate has none"))
         return rows
+    else:
+        if derived.get("definition_sha256") is None:
+            rows.append(_row(name, "definition", DISAGREE, governing[name]["definition_sha256"],
+                             derived.get("executed_as"),
+                             f"{name!r} was established by an invocation the policy does not declare "
+                             f"for it; a gate name is not a gate identity"))
+        else:
+            status, reason = definition_status(
+                {"gate": name, "definition_sha256": derived.get("definition_sha256")}, governing)
+            rows.append(_row(name, "definition", AGREE if status == ADMISSIBLE else DISAGREE,
+                             governing[name]["definition_sha256"], derived.get("definition_sha256"),
+                             reason or "the definition in force is the one this evidence was produced under"))
+        if derived["kind"] == EXECUTION:
+            status, reason = authority_status(name, authority, governing)
+            rows.append(_row(name, "authority", AGREE if status == ADMISSIBLE else DISAGREE,
+                             authority, governing[name]["permitted_authorities"],
+                             reason or "only a declared authority may establish this gate"))
+        else:
+            # Permitted authorities say who may EXECUTE a gate. The judgment half
+            # of a behavioural gate is made by the agent by definition, so asking
+            # whether `agent` may establish it refuses every honest attestation.
+            rows.append(_row(name, "authority", NOT_APPLICABLE, authority,
+                             governing[name]["permitted_authorities"],
+                             "a judgment is made by the agent that attests it; permitted "
+                             "authorities govern who may execute the gate"))
+        declared_target = governing[name]["target"]
 
-    claimed = {"gate": name, "authority": authority,
-               "definition_sha256": derived.get("definition_sha256"),
-               "target_projection": derived.get("target_projection")}
+    if not judgment and derived.get("definition_sha256") is None:
+        # No definition means no declared dimensions to project onto. Reporting
+        # a projection mismatch here would name the second consequence of the
+        # first problem and bury it.
+        for predicate in ("projection binding", "target projection"):
+            rows.append(_row(name, predicate, NOT_COMPARABLE, declared_target, None,
+                             "this row carries no gate definition, so it declares no dimensions"))
+        rows.append(_row(name, "artifact chain", NOT_COMPARABLE, None, None,
+                         "the chain rests on a definition this row does not have"))
+        return [*rows, _aggregate_row(name, rows, derived, authority, governing, current_target)]
 
-    status, reason = definition_status(claimed, governing)
-    rows.append(_row(name, "definition", AGREE if status == ADMISSIBLE else DISAGREE,
-                     governing[name]["definition_sha256"], derived.get("definition_sha256"),
-                     reason or "the definition in force is the one this evidence was produced under"))
-    status, reason = authority_status(name, authority, governing)
-    rows.append(_row(name, "authority", AGREE if status == ADMISSIBLE else DISAGREE,
-                     authority, governing[name]["permitted_authorities"],
-                     reason or "only a declared authority may establish this gate"))
-
-    status, reason = kind_status({"gate": name, "kind": derived["kind"]}, governing, judgments)
-    rows.append(_row(name, "kind requirement", AGREE if status == ADMISSIBLE else DISAGREE,
-                     derived["kind"], governing[name]["evidence_mode"],
-                     reason or "the requirement takes the kind of evidence it takes"))
-
-    declared_target = governing[name]["target"]
     # The row's projection must be the record's target narrowed to what this gate
     # declared. Checked rather than assumed: the projection is what every later
     # predicate reads, so a row carrying one its own record does not support is a
@@ -1302,6 +1370,9 @@ def compare_gate(repo: Path, executed: dict, derived: dict, authority: str, gove
     rows.append(_row(name, "target projection", _projection_outcome(status),
                      declared_target, sorted(derived.get("target_projection") or {}),
                      reason or "compared on exactly the dimensions this gate declares"))
+
+    if judgment:
+        return rows
 
     if governing[name]["evidence_mode"] != "execution+attestation":
         rows.append(_row(name, "artifact chain", NOT_APPLICABLE, None, None,
@@ -1326,18 +1397,32 @@ def compare_gate(repo: Path, executed: dict, derived: dict, authority: str, gove
                          "execution recorded", derived.get("artifacts"),
                          reason or "the execution and the judgment over it bind to the same bytes"))
 
-    # The aggregate M4 will call, beside the predicates it composes - and read as
-    # a check on itself rather than as a sixth opinion. It reports AGREE when it
-    # says exactly what definition, authority and projection said, so it can only
-    # disagree by diverging from its own parts. That is what "aggregator only"
-    # has to mean if it is to be shown rather than asserted.
+    if derived["kind"] != EXECUTION:
+        rows.append(_row(name, "admissibility (aggregate)", NOT_APPLICABLE, None, None,
+                         "the aggregate governs executions; a judgment is bound by the artifact chain"))
+        return rows
+    return [*rows, _aggregate_row(name, rows, derived, authority, governing, current_target)]
+
+
+def _aggregate_row(name: str, rows: list[dict], derived: dict, authority: str,
+                   governing: dict, current_target: dict) -> dict:
+    """The aggregate M4 will call, read as a check on itself rather than a sixth opinion.
+
+    It reports AGREE when it says exactly what definition, authority and
+    projection said, so it can only disagree by diverging from its own parts.
+    That is what "aggregator only" has to mean if it is to be shown rather than
+    asserted on inspection.
+    """
+    claimed = {"gate": name, "authority": authority,
+               "definition_sha256": derived.get("definition_sha256"),
+               "target_projection": derived.get("target_projection")}
     parts = [r["outcome"] for r in rows if r["predicate"] in ("definition", "authority", "target projection")]
     by_parts = all(outcome == AGREE for outcome in parts)
     status, reason = gate_admissibility(claimed, governing, current_target)
-    rows.append(_row(name, "admissibility (aggregate)", AGREE if (status == ADMISSIBLE) == by_parts else DISAGREE,
-                     ADMISSIBLE if by_parts else "refused by a constituent predicate", status,
-                     reason or "the aggregate must say what definition, authority and projection say"))
-    return rows
+    return _row(name, "admissibility (aggregate)",
+                AGREE if (status == ADMISSIBLE) == by_parts else DISAGREE,
+                ADMISSIBLE if by_parts else "refused by a constituent predicate", status,
+                reason or "the aggregate must say what definition, authority and projection say")
 
 
 def _projection_outcome(status: str) -> str:
@@ -1493,6 +1578,106 @@ def command_baseline(args) -> int:
         print(f"  governs  {name}  {governing[name]['definition_sha256'][:19]}…", file=sys.stderr)
     print(f"  baseline {output}", file=sys.stderr)
     return 0
+
+
+def qualification(rows: list[dict]) -> list[dict]:
+    """How each thing M4 would take authority over fared in this evidence set.
+
+    Precedence is deliberate and strict: a disagreement outranks everything, an
+    incomparable row outranks agreement, and a predicate whose every row read N/A
+    is UNCOVERED rather than qualified. N/A means the predicate did not apply to
+    anything here, which establishes nothing about it - and "nothing was
+    established" is the report this stage exists to be able to make.
+    """
+    summary = []
+    for predicate, what in M4_CONTRACT:
+        matched = [row for row in rows if row["predicate"] == predicate
+                   or row["predicate"].startswith(predicate + " (")]
+        counts = {outcome: sum(1 for row in matched if row["outcome"] == outcome)
+                  for outcome in (AGREE, DISAGREE, NOT_COMPARABLE, NOT_APPLICABLE)}
+        if counts[DISAGREE]:
+            state = DISAGREEMENT
+        elif counts[NOT_COMPARABLE]:
+            state = NOT_COMPARABLE
+        elif counts[AGREE]:
+            state = QUALIFIED
+        else:
+            state = UNCOVERED
+        first = next((row for row in matched
+                      if row["outcome"] in (DISAGREE, NOT_COMPARABLE)), None)
+        summary.append({"predicate": predicate, "enforces": what, "state": state,
+                        "counts": counts, "detail": (first or {}).get("why"),
+                        "gate": (first or {}).get("gate")})
+    return summary
+
+
+def command_qualify(args) -> int:
+    """§M3: has everything M4 would take authority over actually run here?
+
+    Not a verdict about the task. The authoritative result for this state is in
+    the composite and is not consulted, not revised and not reported here - a
+    qualification failure disqualifies the evidence/3 path, never the change.
+    """
+    repo = require_repository(Path(args.repo).resolve())
+    declared = policy(repo)
+    paths = [Path(p).resolve() for p in args.paths]
+    records = [(path, load_record(path)) for path in paths]
+    judged = []
+    for path, record in records:
+        if record.get("authority") != "agent":
+            continue
+        try:
+            judged += [row for row in load_shadow_record(shadow_path_for(path)).get("gates") or []
+                       if row.get("kind") == ATTESTATION]
+        except SystemExit:
+            pass
+
+    print("M3 QUALIFICATION (evidence/3, diagnostic - no authority)\n")
+    rows, unpaired = [], []
+    for path, record in records:
+        comparison = compare_records(repo, path, record, declared, judged or None)
+        if comparison["paired"]:
+            rows.extend(comparison["rows"])
+            print(f"  read     {path.name:<24} {record.get('authority', 'local'):<6} "
+                  f"{len(comparison['rows'])} predicates")
+        else:
+            unpaired.append((path, comparison["reason"]))
+            print(f"  unpaired {path.name:<24} {record.get('authority', 'local'):<6} "
+                  f"{comparison['reason']}")
+    summary = qualification(rows)
+    print()
+    for entry in summary:
+        counts = entry["counts"]
+        tally = f"{counts[AGREE]} agree, {counts[DISAGREE]} disagree, {counts[NOT_COMPARABLE]} incomparable"
+        print(f"  {entry['state']:<15} {entry['predicate']:<28} {tally}")
+        if entry["state"] in (DISAGREEMENT, NOT_COMPARABLE):
+            print(f"                    {entry['gate']}: {entry['detail']}")
+        elif entry["state"] == UNCOVERED:
+            print(f"                    nothing in this evidence set exercised it - {entry['enforces']}")
+
+    tally = {state: sum(1 for e in summary if e["state"] == state)
+             for state in (QUALIFIED, DISAGREEMENT, NOT_COMPARABLE, UNCOVERED)}
+    qualified = tally[QUALIFIED] == len(summary) and not unpaired
+    print("\n  " + "-" * 62)
+    print(f"  QUALIFIED {tally[QUALIFIED]}  DISAGREEMENT {tally[DISAGREEMENT]}"
+          f"  NOT COMPARABLE {tally[NOT_COMPARABLE]}  UNCOVERED {tally[UNCOVERED]}")
+    print("  " + "-" * 62)
+    print(f"  M3 QUALIFIED             {str(qualified).upper()}")
+    print("  §M4 may take authority only over semantics qualified above. This says")
+    print("  nothing about the change under verification; that verdict is the composite's.")
+    if args.output:
+        report = {"schema": "verification.ladder.qualification/1", "qualified": qualified,
+                  "recorded_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+                  "verifier": verifier_identity(),
+                  "unpaired": [{"record": path.name, "reason": reason} for path, reason in unpaired],
+                  "predicates": summary}
+        output = Path(args.output).resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report, indent=2) + "\n")
+        print(f"  report   {output}")
+    if qualified:
+        return EXIT[PASS]
+    return EXIT[FAIL] if tally[DISAGREEMENT] else EXIT[BLOCKED]
 
 
 def command_compare(args) -> int:
@@ -2037,6 +2222,12 @@ def main(argv: list[str] | None = None) -> int:
                           help="attestation record to bring into scope, for gates whose judgment "
                                "half lives in one")
     comparer.set_defaults(handler=command_compare)
+
+    qualifier = sub.add_parser(
+        "qualify", help="§M3: whether this evidence set exercised everything M4 would enforce")
+    qualifier.add_argument("paths", nargs="+", help="the authoritative evidence records to qualify over")
+    qualifier.add_argument("--output", help="write the qualification report here")
+    qualifier.set_defaults(handler=command_qualify)
 
     checker = sub.add_parser("check", help="re-bind a record to the current state")
     checker.add_argument("path", help="evidence record to check")
