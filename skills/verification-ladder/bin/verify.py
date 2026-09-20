@@ -54,8 +54,21 @@ VERSION = "0.1.0"  # tracks pyproject's version; tests/test_schema_v3.py holds t
 # compared - so a moved runtime expires a behavioural gate while a lint gate,
 # which cannot depend on one, correctly survives.
 TARGET_DIMENSIONS = ("repository", "runtime")
-GATE_CLASSES = {"local": "local", "ci": "ci", "behavioral": "local"}
+# Which authority a declaration block CONTRIBUTES - never a ceiling on what
+# authorities a gate may have. A behavioural gate declared in [gates.behavioral]
+# contributes `local`, and gains `ci` as well when the policy also declares
+# [gates.ci.<name>] for it. CI permission is declared or the gate does not have
+# it; it is never inferred from the kind of gate. Last entry is the legacy v2
+# [ci_steps] table, which normalizes to the same thing.
+GATE_BLOCKS = ((("gates", "local"), "local", "command"),
+               (("gates", "ci"), "ci", "step"),
+               (("gates", "behavioral"), "local", "driver"),
+               (("ci_steps",), "ci", "step"))
 EVIDENCE_MODES = ("execution", "execution+attestation")
+# How a record's target projection stands against the target in front of us.
+# INADMISSIBLE is not a failure of the change: it says the evidence cannot be
+# read at all, because it does not carry a dimension its own gate declares.
+ADMISSIBLE, INADMISSIBLE = "ADMISSIBLE", "INADMISSIBLE"
 # Where a repository declares what "verified" means for it. The first file that
 # carries a policy wins; pyproject.toml lets a Python project keep one config file.
 POLICY_FILES = (("verification.toml", ()), ("pyproject.toml", ("tool", "verification")))
@@ -343,11 +356,10 @@ def normalize_policy(declared: dict) -> dict[str, dict]:
     mode belong to the gate itself and must agree across its authorities.
     """
     gates: dict[str, dict] = {}
-    sources = [("local", (declared.get("gates") or {}).get("local") or {}, "command"),
-               ("ci", (declared.get("gates") or {}).get("ci") or {}, "step"),
-               ("local", (declared.get("gates") or {}).get("behavioral") or {}, "driver"),
-               ("ci", declared.get("ci_steps") or {}, "step")]
-    for authority, table, key in sources:
+    for path, authority, key in GATE_BLOCKS:
+        table = declared
+        for step in path:
+            table = (table or {}).get(step) or {}
         if not isinstance(table, dict):
             raise blocked(f"policy: gate table for authority {authority!r} is not a table")
         for name, body in table.items():
@@ -439,12 +451,74 @@ def baseline_record(repo: Path, declared: dict, gates: list[dict], *, origin: st
         "recorded_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "origin": origin,
         "verifier": verifier_identity(),
-        "target_state": {"repository": {"head": head_sha(repo),
-                                        "worktree_state": state_id(repo, exclude)}},
+        "target_state": {"repository": repository_identity(repo, exclude)},
         "governing": {"policy_sha256": digest_of(declared),
                       "gates": gate_definitions(repo, declared)},
         "gates": gates,
     }
+
+
+def index_state(repo: Path) -> str:
+    """Identify the staged tree, which the worktree digest cannot see.
+
+    Two checkouts can share HEAD, share every working-tree byte and report the
+    same `git status` codes while holding different content in the index - the
+    worktree digest collides and `git diff --cached` differs. The ladder asks an
+    agent to read the diff, so the index is part of the state being verified.
+    `ls-files --stage` names mode, blob and path for every entry, which is that
+    content by identity rather than by re-reading it.
+    """
+    return "sha256:" + hashlib.sha256(git(repo, "ls-files", "--stage", "-z")).hexdigest()
+
+
+def repository_identity(repo: Path, exclude: frozenset[str] = frozenset()) -> dict:
+    """The repository dimension of a target: HEAD, the index, and the worktree."""
+    return {"head": head_sha(repo),
+            "index_state": index_state(repo),
+            "worktree_state": state_id(repo, exclude)}
+
+
+def runtime_identity(facts: dict) -> dict:
+    """The runtime dimension: the facts that decide a behavioural result, by digest.
+
+    For a single application these are build, instance and flag state; for a
+    distributed target the same shape carries service identity resolved to image
+    digests. The verifier does not interpret them - it binds to them.
+    """
+    if not isinstance(facts, dict) or not facts:
+        raise blocked("runtime identity needs a non-empty table of facts to bind to")
+    return {"manifest_sha256": digest_of(facts), "facts": facts}
+
+
+def target_projection(target_state: dict, dimensions) -> dict:
+    """A target narrowed to the dimensions one gate declares.
+
+    Comparing whole target states would expire a lint gate because a runtime it
+    cannot depend on moved. Comparing nothing would let a behavioural gate survive
+    a runtime change. Each gate is compared on exactly what it declared.
+    """
+    return {dimension: target_state[dimension] for dimension in dimensions if dimension in target_state}
+
+
+def projection_status(record_target: dict, dimensions, current_target: dict) -> tuple[str, str | None]:
+    """Whether one record's target still describes the target in front of us.
+
+    Three outcomes, and they are not the same news. A dimension the gate declares
+    but the record omits is INADMISSIBLE - the evidence cannot be read, and must
+    never pass by defaulting to "matched". A dimension the record carries that
+    cannot be interrogated now is BLOCKED: no target, not a different one. A
+    dimension that differs is STALE: the evidence is about another target.
+    """
+    for dimension in dimensions:
+        if dimension not in record_target:
+            return INADMISSIBLE, (f"evidence omits the {dimension!r} dimension its gate declares; "
+                                  f"a missing dimension is never a matching one")
+        if dimension not in current_target:
+            return BLOCKED, (f"the {dimension!r} dimension cannot be interrogated here, so there is "
+                             f"no target to compare against - this is absence of evidence, not a mismatch")
+        if record_target[dimension] != current_target[dimension]:
+            return STALE, f"evidence binds to another {dimension!r}; re-verify against this one"
+    return ADMISSIBLE, None
 
 
 def load_json(path: Path) -> dict:
