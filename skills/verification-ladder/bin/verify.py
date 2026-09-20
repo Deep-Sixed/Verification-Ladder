@@ -690,6 +690,74 @@ def record_id(row: dict) -> str:
     return digest_of({k: v for k, v in row.items() if k != "record_id"})
 
 
+def ci_provenance_status(run: dict, job: dict, expected: dict) -> tuple[str, str | None]:
+    """Prove a CI result belongs to this commit, in this repository, from one run.
+
+    `head_sha` alone establishes that a run NAMED the commit. It does not
+    establish that the job whose steps are being read belongs to that run, that
+    the run belongs to this repository, or that the workflow and job are the ones
+    the gate rests on. A job payload from another run composes with this run's
+    metadata unless every link is checked, so the whole chain is:
+
+        repository -> run -> attempt -> workflow -> job -> step -> commit
+
+    Fields the payloads do not carry are not invented: a link that cannot be
+    checked is reported as unverifiable rather than passed over.
+    """
+    sha = run.get("head_sha")
+    if not sha:
+        return INADMISSIBLE, "run payload carries no head_sha; there is no commit to bind to"
+    if sha != expected["head_sha"]:
+        return INADMISSIBLE, (f"run is for {sha[:12]}, the commit under verification is "
+                              f"{expected['head_sha'][:12]}")
+    repository = (run.get("repository") or {}).get("full_name")
+    if expected.get("repository"):
+        if not repository:
+            return INADMISSIBLE, ("run payload names no repository, so it cannot be told from a fork's "
+                                  "run on the same commit")
+        if repository != expected["repository"]:
+            return INADMISSIBLE, (f"run belongs to {repository!r}, the repository under verification is "
+                                  f"{expected['repository']!r}")
+    if job.get("run_id") is None or run.get("id") is None:
+        return INADMISSIBLE, "cannot bind job to run: one of them carries no run id"
+    if job["run_id"] != run["id"]:
+        return INADMISSIBLE, (f"job belongs to run {job['run_id']}, the metadata is from run "
+                              f"{run['id']}; a job from another run establishes nothing here")
+    attempts = (run.get("run_attempt"), job.get("run_attempt"))
+    if all(a is not None for a in attempts) and attempts[0] != attempts[1]:
+        return INADMISSIBLE, (f"job is from attempt {attempts[1]}, the run metadata is attempt "
+                              f"{attempts[0]}")
+    if job.get("head_sha") and job["head_sha"] != sha:
+        return INADMISSIBLE, f"job ran {job['head_sha'][:12]}, the run names {sha[:12]}"
+    if expected.get("workflow") and run.get("path") != expected["workflow"]:
+        return INADMISSIBLE, (f"run is workflow {run.get('path')!r}, the gate rests on "
+                              f"{expected['workflow']!r}")
+    if expected.get("job") and job.get("name") != expected["job"]:
+        return INADMISSIBLE, f"job is {job.get('name')!r}, the gate rests on {expected['job']!r}"
+    accepted = expected.get("events") or ["push"]
+    if run.get("event") not in accepted:
+        return INADMISSIBLE, (f"a {run.get('event')} run checks out a merge of {sha[:12]} into its "
+                              f"base, so its results describe that merge; import the "
+                              f"{'/'.join(accepted)} run for this commit")
+    return ADMISSIBLE, None
+
+
+def ci_step_status(job: dict, step_name: str) -> tuple[str, str | None]:
+    """One workflow step's conclusion, read as a gate result.
+
+    A step that was skipped, cancelled, is still running or is absent from the
+    job establishes nothing - it is BLOCKED rather than a pass or a failure,
+    because nothing ran to have an opinion about.
+    """
+    conclusions = {step.get("name"): step.get("conclusion") for step in job.get("steps") or []}
+    if step_name not in conclusions:
+        return BLOCKED, f"step {step_name!r} is absent from this job; the gate rests on a step nobody ran"
+    verdict = CI_CONCLUSIONS.get(conclusions[step_name])
+    if verdict is None:
+        return BLOCKED, f"step {step_name!r} is {conclusions[step_name] or 'unfinished'}, which establishes nothing"
+    return verdict, None
+
+
 def load_json(path: Path) -> dict:
     try:
         return json.loads(path.read_text())
