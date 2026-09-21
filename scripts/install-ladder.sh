@@ -167,6 +167,11 @@ done
 # ---- step 1b: preserve bootstrap tooling outside the pinned checkout ---
 step "1b. Preserving bootstrap tooling in $BOOTSTRAP_DIR"
 preserve_bootstrap() {
+  # Fail closed: $PIN does not contain check-install.sh, so if it is not beside
+  # the installer now it cannot be recovered later, and the closing message
+  # would name a checker that was never preserved.
+  [ -f "$SELF_DIR/check-install.sh" ] \
+    || die "check-install.sh is not beside $SELF; refusing because $PIN does not contain it"
   if [ "$SELF_DIR" = "$BOOTSTRAP_DIR" ]; then
     say "already running from the bootstrap directory - nothing to copy"
     return 0
@@ -174,13 +179,8 @@ preserve_bootstrap() {
   run mkdir -p "$BOOTSTRAP_DIR"
   run cp "$SELF" "$BOOTSTRAP_DIR/install-ladder.sh"
   run chmod +x "$BOOTSTRAP_DIR/install-ladder.sh"
-  if [ -f "$SELF_DIR/check-install.sh" ]; then
-    run cp "$SELF_DIR/check-install.sh" "$BOOTSTRAP_DIR/check-install.sh"
-    run chmod +x "$BOOTSTRAP_DIR/check-install.sh"
-  else
-    echo "  WARNING: check-install.sh is not beside $SELF; it will not be preserved" >&2
-    echo "    and \$PIN does not contain it. Copy it into $BOOTSTRAP_DIR by hand." >&2
-  fi
+  run cp "$SELF_DIR/check-install.sh" "$BOOTSTRAP_DIR/check-install.sh"
+  run chmod +x "$BOOTSTRAP_DIR/check-install.sh"
   [ "$DRY" -eq 1 ] && return 0
   # Provenance: once copied out, these files are detached from the commit that
   # produced them and would otherwise have no identity at all.
