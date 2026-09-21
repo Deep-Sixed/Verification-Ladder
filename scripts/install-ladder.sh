@@ -17,6 +17,12 @@ REPO=https://github.com/Deep-Sixed/Verification-Ladder
 INV_SHA=282f21173aad9815a22a6ece35ad0fdd42653dd7a001dc6d85e6d51189aa5699
 CLONE=$HOME/src/verification-ladder
 CODEX_HOME=${CODEX_HOME:-$HOME/.codex}
+# Bootstrap tooling lives OUTSIDE the pinned checkout. $PIN predates these
+# scripts, so detaching to it removes them from $CLONE - including this file
+# while it is running. They are copied here first so the checker survives.
+BOOTSTRAP_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/verification-ladder
+SELF=$(readlink -f "$0" 2>/dev/null || echo "$0")
+SELF_DIR=$(dirname "$SELF")
 DO_CODEX=0; DRY=0; FORCE=0
 
 while [ $# -gt 0 ]; do
@@ -158,6 +164,40 @@ for p in "$CLONE" "$HOME/.claude/skills/verification-ladder" "$HOME/.claude/CLAU
   fi
 done
 
+# ---- step 1b: preserve bootstrap tooling outside the pinned checkout ---
+step "1b. Preserving bootstrap tooling in $BOOTSTRAP_DIR"
+preserve_bootstrap() {
+  if [ "$SELF_DIR" = "$BOOTSTRAP_DIR" ]; then
+    say "already running from the bootstrap directory - nothing to copy"
+    return 0
+  fi
+  run mkdir -p "$BOOTSTRAP_DIR"
+  run cp "$SELF" "$BOOTSTRAP_DIR/install-ladder.sh"
+  run chmod +x "$BOOTSTRAP_DIR/install-ladder.sh"
+  if [ -f "$SELF_DIR/check-install.sh" ]; then
+    run cp "$SELF_DIR/check-install.sh" "$BOOTSTRAP_DIR/check-install.sh"
+    run chmod +x "$BOOTSTRAP_DIR/check-install.sh"
+  else
+    echo "  WARNING: check-install.sh is not beside $SELF; it will not be preserved" >&2
+    echo "    and \$PIN does not contain it. Copy it into $BOOTSTRAP_DIR by hand." >&2
+  fi
+  [ "$DRY" -eq 1 ] && return 0
+  # Provenance: once copied out, these files are detached from the commit that
+  # produced them and would otherwise have no identity at all.
+  src_rev=$(git -C "$SELF_DIR" rev-parse HEAD 2>/dev/null) || src_rev="not a git checkout"
+  {
+    echo "installed-at:    $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "source-dir:      $SELF_DIR"
+    echo "source-revision: $src_rev"
+    echo "ladder-pin:      $PIN"
+    for f in install-ladder.sh check-install.sh; do
+      [ -f "$BOOTSTRAP_DIR/$f" ] && echo "$f: sha256:$(sha256sum "$BOOTSTRAP_DIR/$f" | cut -d" " -f1)"
+    done
+  } > "$BOOTSTRAP_DIR/PROVENANCE" || die "could not write $BOOTSTRAP_DIR/PROVENANCE"
+  say "recorded provenance (source revision $src_rev)"
+}
+preserve_bootstrap
+
 # ---- step 2-3: clone / update, then detach at the pin -----------------
 step "2-3. Canonical checkout at $PIN"
 if [ -d "$CLONE/.git" ]; then
@@ -275,5 +315,9 @@ if [ "$INV_RC" -ne 0 ]; then
   echo "Resolve the reason printed above, then re-run."
   exit 1
 fi
-echo "Steps 1-5 done. Next: check-install.sh, then the discovery test,"
-echo "then the agent-level policy-less BLOCKED test (steps 6-8)."
+echo "Steps 1-5 done. Next:"
+[ "$DO_CODEX" -eq 1 ] && CODEX_ARG=" --codex" || CODEX_ARG=""
+echo "  $BOOTSTRAP_DIR/check-install.sh$CODEX_ARG"
+echo "then the discovery test, then the agent-level policy-less BLOCKED test."
+echo "(\$CLONE is pinned at $PIN, which predates these scripts, so they live"
+echo " in $BOOTSTRAP_DIR rather than inside the checkout.)"

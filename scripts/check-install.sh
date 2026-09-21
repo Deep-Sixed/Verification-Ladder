@@ -28,6 +28,17 @@ done
 rc=0
 fail() { echo "FAIL  $1"; rc=1; }
 ok()   { echo "ok    $1"; }
+note() { echo "note  $1"; }
+
+# These scripts live outside the pinned checkout, because $PIN predates them.
+# Report where this copy came from: once detached from its source commit it has
+# no other identity. Informational - running from a branch checkout is valid.
+BOOTSTRAP_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/verification-ladder
+if [ -f "$BOOTSTRAP_DIR/PROVENANCE" ]; then
+  note "bootstrap provenance: $(sed -n 's/^source-revision: //p' "$BOOTSTRAP_DIR/PROVENANCE") from $(sed -n 's/^source-dir: *//p' "$BOOTSTRAP_DIR/PROVENANCE")"
+else
+  note "no bootstrap provenance recorded at $BOOTSTRAP_DIR (running from a source checkout?)"
+fi
 
 CANON=$(mktemp "${TMPDIR:-/tmp}/ladder-invariant-check.XXXXXX") \
   || { echo "could not create temporary file" >&2; exit 1; }
