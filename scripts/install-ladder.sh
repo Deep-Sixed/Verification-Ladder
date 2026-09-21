@@ -1,22 +1,27 @@
 #!/bin/sh
-# Verification Ladder installer - steps 1-5 of the Thanatos sequence.
+# Verification Ladder installer - steps 1-5 of the install sequence.
+# POSIX sh SYNTAX, targeting GNU/Linux: uses readlink -f and python3.
 # Idempotent. Never overwrites existing global instructions.
-# Usage: install-ladder.sh [--codex] [--pin SHA] [--dry-run] [--force-link]
+# Usage: install-ladder.sh [--codex] [--dry-run] [--force-link]
+#
+# There is deliberately no --pin. Changing the pinned revision means changing
+# PIN and INV_SHA below, which is a reviewed change to this file rather than a
+# command-line argument that no reviewer sees.
 set -u
 
 PIN=760977f69d6b74b9888be4c9cbb404f7726bea73
 REPO=https://github.com/Deep-Sixed/Verification-Ladder
-SLUG=deep-sixed/verification-ladder
-# sha256 of the invariant block as it stands at $PIN. Changing the pin without
-# revalidating this makes the installer fail closed rather than paste unknown text.
+# sha256 of the invariant block in INSTALL.md at $PIN. Moving the pin without
+# revalidating this makes the installer fail closed rather than paste unknown
+# text into global agent instructions.
 INV_SHA=282f21173aad9815a22a6ece35ad0fdd42653dd7a001dc6d85e6d51189aa5699
 CLONE=$HOME/src/verification-ladder
+CODEX_HOME=${CODEX_HOME:-$HOME/.codex}
 DO_CODEX=0; DRY=0; FORCE=0
 
 while [ $# -gt 0 ]; do
   case $1 in
     --codex) DO_CODEX=1 ;;
-    --pin) PIN=$2; shift ;;
     --dry-run) DRY=1 ;;
     --force-link) FORCE=1 ;;
     *) echo "unknown arg: $1" >&2; exit 64 ;;
@@ -27,12 +32,100 @@ done
 say()  { echo "  $*"; }
 step() { echo; echo "== $*"; }
 die()  { echo "ABORT: $*" >&2; exit 1; }
-run()  { if [ $DRY -eq 1 ]; then echo "  [dry-run] $*"; else eval "$@"; fi; }
+
+# argv execution, no eval: a failing command aborts instead of being ignored.
+run() {
+  if [ "$DRY" -eq 1 ]; then
+    printf '  [dry-run]'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'
+    return 0
+  fi
+  "$@" || die "command failed: $*"
+}
+
+# Accept only explicit GitHub origins for this repository. Reducing an
+# arbitrary URL to its last two path components would accept any host.
+# get-url, not `config --get`: the latter ignores url.*.insteadOf rewriting,
+# so the stored URL can differ from the one git actually fetches.
+origin_url() { git -C "$1" remote get-url origin 2>/dev/null; }
+origin_ok() {
+  case "$(printf '%s' "${1:-}" | tr 'A-Z' 'a-z')" in
+    https://github.com/deep-sixed/verification-ladder|\
+    https://github.com/deep-sixed/verification-ladder.git|\
+    git@github.com:deep-sixed/verification-ladder|\
+    git@github.com:deep-sixed/verification-ladder.git|\
+    ssh://git@github.com/deep-sixed/verification-ladder|\
+    ssh://git@github.com/deep-sixed/verification-ladder.git) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+CANON=${TMPDIR:-/tmp}/ladder-invariant.$$
+cleanup() { rm -f "$CANON"; }
+trap cleanup EXIT INT TERM
+
+# Extract the canonical invariant from the pinned INSTALL.md and verify its
+# checksum. Writes it to $CANON.
+invariant_extract() {
+  python3 - "$CLONE/INSTALL.md" "$INV_SHA" "$CANON" <<'PY'
+import sys, hashlib
+src, want, out = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    text = open(src, encoding="utf-8").read()
+except OSError as exc:
+    sys.exit("cannot read %s: %s" % (src, exc))
+block, in_section, in_fence, closed = [], False, False, False
+for line in text.splitlines():
+    if line.startswith("## The invariant"):
+        in_section = True
+        continue
+    if in_section and not in_fence and line.strip() == "```markdown":
+        in_fence = True
+        continue
+    if in_fence:
+        if line.strip() == "```":
+            closed = True
+            break
+        block.append(line)
+if not block or not closed:
+    sys.exit("invariant block not found or fence unclosed in %s" % src)
+body = "\n".join(block) + "\n"
+got = hashlib.sha256(body.encode("utf-8")).hexdigest()
+if got != want:
+    sys.exit("INV_SHA mismatch\n    expected %s\n    got      %s\n"
+             "    Read INSTALL.md at this revision, confirm the block, update INV_SHA."
+             % (want, got))
+open(out, "w", encoding="utf-8").write(body)
+PY
+}
+
+# exact | partial | absent - exact requires the whole contiguous block,
+# not a set of anchor lines that a gutted file would also satisfy.
+invariant_state() {
+  python3 - "$CANON" "$1" <<'PY'
+import sys, os
+canon = open(sys.argv[1], encoding="utf-8").read().strip()
+target = sys.argv[2]
+if not os.path.exists(target):
+    print("absent"); raise SystemExit
+try:
+    text = open(target, encoding="utf-8").read()
+except OSError:
+    print("unreadable"); raise SystemExit
+if canon in text:
+    print("exact")
+elif ("For every task that modifies repository state" in text
+      or "you hold for the current state." in text):
+    print("partial")
+else:
+    print("absent")
+PY
+}
 
 # ---- step 1: inspect before touching anything -------------------------
 step "1. Inspecting current state"
 for p in "$CLONE" "$HOME/.claude/skills/verification-ladder" "$HOME/.claude/CLAUDE.md" \
-         "$HOME/.codex/skills/verification-ladder"; do
+         "$CODEX_HOME/skills/verification-ladder" "$CODEX_HOME/AGENTS.override.md" \
+         "$CODEX_HOME/AGENTS.md"; do
   if   [ -L "$p" ]; then say "symlink  $p -> $(readlink "$p")"
   elif [ -d "$p" ]; then say "dir      $p"
   elif [ -e "$p" ]; then say "file     $p ($(wc -l <"$p") lines)"
@@ -43,19 +136,25 @@ done
 # ---- step 2-3: clone / update, then detach at the pin -----------------
 step "2-3. Canonical checkout at $PIN"
 if [ -d "$CLONE/.git" ]; then
-  o=$(git -C "$CLONE" config --get remote.origin.url 2>/dev/null)
-  n=$(printf '%s' "$o" | tr 'A-Z' 'a-z' | sed -e 's/\.git$//' -e 's#.*[/:]\([^/]*/[^/]*\)$#\1#')
-  [ "$n" = "$SLUG" ] || die "$CLONE origin is '${o:-<none>}', not $SLUG - refusing to touch it"
-  [ -n "$(git -C "$CLONE" status --porcelain)" ] \
-    && die "$CLONE has local modifications; resolve them first (not overwriting your work)"
-  run "git -C '$CLONE' fetch --quiet origin"
+  u=$(origin_url "$CLONE")
+  origin_ok "$u" || die "$CLONE origin is '${u:-<none>}', not this repository - refusing to touch it"
+  say "origin verified: $u"
+  status=$(git -C "$CLONE" status --porcelain 2>/dev/null) \
+    || die "cannot inspect $CLONE status"
+  [ -n "$status" ] && die "$CLONE has local modifications; resolve them first (not overwriting your work)"
+  run git -C "$CLONE" fetch --quiet origin
 else
-  run "mkdir -p '$(dirname "$CLONE")'"
-  run "git clone --quiet '$REPO' '$CLONE'"
+  run mkdir -p "$(dirname "$CLONE")"
+  run git clone --quiet "$REPO" "$CLONE"
 fi
-if [ $DRY -eq 0 ]; then
+if [ "$DRY" -eq 0 ]; then
   git -C "$CLONE" cat-file -e "$PIN^{commit}" 2>/dev/null || die "commit $PIN not found in $CLONE"
-  git -C "$CLONE" checkout --quiet --detach "$PIN" || die "could not detach at $PIN"
+  # Existing locally is not enough: require the pin to be reachable from the
+  # authoritative branch, so a stray local commit cannot masquerade as the pin.
+  git -C "$CLONE" merge-base --is-ancestor "$PIN" refs/remotes/origin/main 2>/dev/null \
+    || die "$PIN is not an ancestor of origin/main - refusing to install an unreachable revision"
+  say "pin reachable from origin/main"
+  run git -C "$CLONE" checkout --quiet --detach "$PIN"
   say "detached at $(git -C "$CLONE" rev-parse HEAD)"
 fi
 
@@ -63,61 +162,77 @@ fi
 link_skill() {
   root=$1; link=$root/verification-ladder; target=$CLONE/skills/verification-ladder
   if [ -L "$link" ]; then
-    [ "$(readlink -f "$link")" = "$target" ] && { say "already linked correctly: $link"; return; }
-    say "relinking $link (was -> $(readlink "$link"))"; run "rm '$link'"
+    if [ "$(readlink -f "$link")" = "$target" ]; then say "already linked correctly: $link"; return 0; fi
+    say "relinking $link (was -> $(readlink "$link"))"; run rm "$link"
   elif [ -e "$link" ]; then
-    [ $FORCE -eq 0 ] && die "$link exists and is NOT a symlink (a copy). Re-run with --force-link to back it up and replace."
-    say "backing up copy -> $link.bak.$$"; run "mv '$link' '$link.bak.$$'"
+    [ "$FORCE" -eq 0 ] && die "$link exists and is NOT a symlink (a copy). Re-run with --force-link to back it up and replace."
+    say "backing up copy -> $link.bak.$$"; run mv "$link" "$link.bak.$$"
   fi
-  run "mkdir -p '$root'"
-  run "ln -s '$target' '$link'"
+  run mkdir -p "$root"
+  run ln -s "$target" "$link"
   say "linked $link"
 }
 step "4. Skill symlinks"
 link_skill "$HOME/.claude/skills"
-[ $DO_CODEX -eq 1 ] && link_skill "$HOME/.codex/skills"
+[ "$DO_CODEX" -eq 1 ] && link_skill "$CODEX_HOME/skills"
 
 # ---- step 5: append invariant, sourced from the pin, never overwrite --
-install_invariant() {
-  c=$1
-  inv=$(awk '/^## The invariant/{f=1} f&&/^```markdown$/{g=1;next} g&&/^```$/{exit} g{print}' \
-          "$CLONE/INSTALL.md")
-  got=$(printf '%s\n' "$inv" | sha256sum | cut -d' ' -f1)
-  if [ "$got" != "$INV_SHA" ]; then
-    echo "  REFUSING: invariant block at this pin does not match INV_SHA." >&2
-    echo "    expected $INV_SHA" >&2
-    echo "    got      $got" >&2
-    echo "    Read INSTALL.md at this revision, confirm the block, update INV_SHA." >&2
-    return 1
-  fi
-  say "invariant extracted and checksum-verified ($INV_SHA)" 
-  first=$(echo "$inv" | head -1)
-  last="you hold for the current state."
-  if [ -e "$c" ]; then
-    if grep -qF "$first" "$c" && grep -qF "$last" "$c"; then
-      say "invariant already complete in $c - nothing to do"; return
-    fi
-    if grep -qF "$first" "$c" || grep -qF "$last" "$c"; then
-      echo "  PARTIAL invariant already in $c."
-      echo "  Refusing to append - that would duplicate or contradict it."
-      echo "  Merge by hand, then re-run. (This is a judgment call, not automatable.)"
-      return 1
-    fi
-    say "backing up -> $c.bak.$$"; run "cp '$c' '$c.bak.$$'"
-    say "appending invariant to existing $c"
-  else
-    run "mkdir -p '$(dirname "$c")'"; say "creating $c"
-  fi
-  if [ $DRY -eq 1 ]; then echo "  [dry-run] append 16-line invariant to $c"; return; fi
-  { [ -s "$c" ] && printf '\n'; printf '# Verification\n\n%s\n' "$inv"; } >> "$c"
-}
 step "5. Global invariant (appended, never overwritten)"
 INV_RC=0
-install_invariant "$HOME/.claude/CLAUDE.md" || INV_RC=1
-[ $DO_CODEX -eq 1 ] && { say "Codex: add the same invariant to your Codex global instructions by hand"; }
+if [ "$DRY" -eq 1 ] && [ ! -e "$CLONE/INSTALL.md" ]; then
+  echo "  DRY-RUN INCOMPLETE: no clone yet, so the invariant cannot be extracted" >&2
+  echo "    or checksum-verified. --dry-run only validates step 5 when \$CLONE exists." >&2
+  INV_RC=2
+elif ! invariant_extract; then
+  INV_RC=1
+else
+  say "invariant extracted and checksum-verified ($INV_SHA)"
+fi
+
+install_invariant() {
+  c=$1; label=$2
+  state=$(invariant_state "$c")
+  case $state in
+    exact)  say "$label: canonical invariant already present in $c - nothing to do"; return 0 ;;
+    partial)
+      echo "  $label: PARTIAL or MODIFIED invariant in $c." >&2
+      echo "    The canonical block is not present verbatim, but invariant-like text is." >&2
+      echo "    Refusing to append - that would duplicate or contradict it. Merge by hand." >&2
+      return 1 ;;
+    unreadable) echo "  $label: cannot read $c" >&2; return 1 ;;
+  esac
+  if [ -e "$c" ]; then
+    say "$label: backing up -> $c.bak.$$"; run cp "$c" "$c.bak.$$"
+    say "$label: appending invariant to existing $c"
+  else
+    run mkdir -p "$(dirname "$c")"; say "$label: creating $c"
+  fi
+  [ "$DRY" -eq 1 ] && { echo "  [dry-run] append canonical invariant to $c"; return 0; }
+  { [ -s "$c" ] && printf '\n'; printf '# Verification\n\n'; cat "$CANON"; } >> "$c" \
+    || { echo "  $label: append to $c failed" >&2; return 1; }
+  return 0
+}
+
+# Codex reads its global instructions from AGENTS.override.md when present,
+# otherwise AGENTS.md, both under CODEX_HOME.
+codex_instruction_file() {
+  if [ -e "$CODEX_HOME/AGENTS.override.md" ]; then echo "$CODEX_HOME/AGENTS.override.md"
+  else echo "$CODEX_HOME/AGENTS.md"; fi
+}
+
+if [ "$INV_RC" -eq 0 ]; then
+  install_invariant "$HOME/.claude/CLAUDE.md" "claude" || INV_RC=1
+  if [ "$DO_CODEX" -eq 1 ]; then
+    install_invariant "$(codex_instruction_file)" "codex" || INV_RC=1
+  fi
+fi
 
 echo
-if [ $INV_RC -ne 0 ]; then
+if [ "$INV_RC" -eq 2 ]; then
+  echo "DRY-RUN INCOMPLETE: step 5 was not validated (see above)."
+  exit 2
+fi
+if [ "$INV_RC" -ne 0 ]; then
   echo "INCOMPLETE: skill is linked, but the global invariant was NOT installed."
   echo "Without it the agent has no instruction to invoke the Ladder."
   echo "Resolve the reason printed above, then re-run."
