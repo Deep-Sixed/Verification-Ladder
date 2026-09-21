@@ -1,6 +1,6 @@
 #!/bin/sh
 # Verification Ladder install check. Run on the target machine.
-# POSIX sh SYNTAX, targeting GNU/Linux: uses readlink -f and python3.
+# POSIX sh SYNTAX, targeting GNU/Linux: uses readlink -f, mktemp and python3.
 # Usage: check-install.sh [--codex]
 #
 # Establishes INSTALLATION INTEGRITY only. It does not establish that an agent
@@ -13,14 +13,31 @@ INV_SHA=282f21173aad9815a22a6ece35ad0fdd42653dd7a001dc6d85e6d51189aa5699
 CLONE=$HOME/src/verification-ladder
 LINK=$HOME/.claude/skills/verification-ladder
 CODEX_HOME=${CODEX_HOME:-$HOME/.codex}
-CHECK_CODEX=0; [ "${1:-}" = "--codex" ] && CHECK_CODEX=1
+CHECK_CODEX=0
+
+# Strict parsing: a typo must not silently narrow the scope of the check and
+# still exit 0, which automation reading only the status would take as a pass.
+while [ $# -gt 0 ]; do
+  case $1 in
+    --codex) CHECK_CODEX=1 ;;
+    *) echo "unknown arg: $1" >&2; echo "usage: check-install.sh [--codex]" >&2; exit 64 ;;
+  esac
+  shift
+done
+
 rc=0
 fail() { echo "FAIL  $1"; rc=1; }
 ok()   { echo "ok    $1"; }
 
-CANON=${TMPDIR:-/tmp}/ladder-invariant-check.$$
+CANON=$(mktemp "${TMPDIR:-/tmp}/ladder-invariant-check.XXXXXX") \
+  || { echo "could not create temporary file" >&2; exit 1; }
 cleanup() { rm -f "$CANON"; }
-trap cleanup EXIT INT TERM
+trap 'cleanup' EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
+HAVE_GIT=0
+git -C "$CLONE" rev-parse --git-dir >/dev/null 2>&1 && HAVE_GIT=1
 
 # --- property 1a: identity of the checkout -----------------------------
 # get-url, not `config --get`: the latter ignores url.*.insteadOf rewriting.
@@ -36,21 +53,44 @@ case "$(printf '%s' "$ORIGIN" | tr 'A-Z' 'a-z')" in
   *) fail "origin is '${ORIGIN:-<none>}', not an accepted GitHub URL for this repository" ;;
 esac
 
-HEAD_SHA=$(git -C "$CLONE" rev-parse HEAD 2>/dev/null) || HEAD_SHA=""
-[ "$HEAD_SHA" = "$PIN" ] && ok "clone at $PIN" || fail "clone at '${HEAD_SHA:-<none>}', expected $PIN"
-
-if git -C "$CLONE" rev-parse --git-dir >/dev/null 2>&1; then
-  git -C "$CLONE" symbolic-ref -q HEAD >/dev/null 2>&1 \
-    && fail "clone is ON A BRANCH ($(git -C "$CLONE" symbolic-ref --short HEAD)) - not a pin" \
-    || ok "clone detached"
+# --- property 1a': no object substitution ------------------------------
+# A replacement ref makes rev-parse report the pin while the worktree holds
+# another commit's bytes, with `status` and `diff $PIN` both reading clean.
+if [ "$HAVE_GIT" -eq 1 ]; then
+  if REPS=$(git -C "$CLONE" replace -l 2>/dev/null); then
+    [ -z "$REPS" ] && ok "no git replacement refs" \
+      || fail "git replacement refs present ($(printf '%s' "$REPS" | tr '\n' ' ')) - the pin can name one tree while git serves another"
+  else
+    fail "could not inspect replacement refs"
+  fi
+  # --absolute-git-dir, because --git-path returns a path relative to the
+  # repository and testing it would resolve against the caller's cwd instead.
+  if GITDIR=$(git -C "$CLONE" rev-parse --absolute-git-dir 2>/dev/null); then
+    [ -s "$GITDIR/info/grafts" ] \
+      && fail "non-empty grafts file ($GITDIR/info/grafts) - ancestry is rewritten" \
+      || ok "no grafts"
+  else
+    fail "could not locate the git directory of $CLONE"
+  fi
 else
   fail "no git repository at $CLONE"
 fi
 
+HEAD_SHA=$(git -C "$CLONE" rev-parse HEAD 2>/dev/null) || HEAD_SHA=""
+[ "$HEAD_SHA" = "$PIN" ] && ok "clone at $PIN" || fail "clone at '${HEAD_SHA:-<none>}', expected $PIN"
+
+if [ "$HAVE_GIT" -eq 1 ]; then
+  git -C "$CLONE" symbolic-ref -q HEAD >/dev/null 2>&1 \
+    && fail "clone is ON A BRANCH ($(git -C "$CLONE" symbolic-ref --short HEAD)) - not a pin" \
+    || ok "clone detached"
+fi
+
 # --- property 1b: the pinned TREE, not just the pinned HEAD ------------
-if git -C "$CLONE" rev-parse --git-dir >/dev/null 2>&1; then
-  git -C "$CLONE" diff --quiet "$PIN" -- 2>/dev/null \
-    && ok "tracked tree identical to pin" || fail "tracked files differ from $PIN"
+# GIT_NO_REPLACE_OBJECTS so this compares real objects, not substituted ones.
+if [ "$HAVE_GIT" -eq 1 ]; then
+  GIT_NO_REPLACE_OBJECTS=1 git -C "$CLONE" diff --quiet "$PIN" -- 2>/dev/null \
+    && ok "tracked tree identical to pin (replacement-free)" \
+    || fail "tracked files differ from $PIN"
 else
   fail "cannot diff tree: no git repository at $CLONE"
 fi

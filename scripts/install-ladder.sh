@@ -1,6 +1,6 @@
 #!/bin/sh
 # Verification Ladder installer - steps 1-5 of the install sequence.
-# POSIX sh SYNTAX, targeting GNU/Linux: uses readlink -f and python3.
+# POSIX sh SYNTAX, targeting GNU/Linux: uses readlink -f, mktemp and python3.
 # Idempotent. Never overwrites existing global instructions.
 # Usage: install-ladder.sh [--codex] [--dry-run] [--force-link]
 #
@@ -46,7 +46,6 @@ run() {
 # arbitrary URL to its last two path components would accept any host.
 # get-url, not `config --get`: the latter ignores url.*.insteadOf rewriting,
 # so the stored URL can differ from the one git actually fetches.
-origin_url() { git -C "$1" remote get-url origin 2>/dev/null; }
 origin_ok() {
   case "$(printf '%s' "${1:-}" | tr 'A-Z' 'a-z')" in
     https://github.com/deep-sixed/verification-ladder|\
@@ -58,13 +57,39 @@ origin_ok() {
     *) return 1 ;;
   esac
 }
+verify_origin() {
+  u=$(git -C "$CLONE" remote get-url origin 2>/dev/null) \
+    || die "cannot read origin of $CLONE"
+  origin_ok "$u" || die "$CLONE origin is '${u:-<none>}', not this repository"
+  say "origin verified: $u"
+}
 
-CANON=${TMPDIR:-/tmp}/ladder-invariant.$$
+# git replace substitutes object content beneath every ordinary check:
+# rev-parse reports the pin, the worktree holds another commit's bytes, and
+# `status` and `diff $PIN` both read clean. Grafts rewrite ancestry similarly.
+# Refuse either outright - the verifier installed here also invokes git.
+refuse_history_rewrites() {
+  reps=$(git -C "$CLONE" replace -l 2>/dev/null) \
+    || die "could not inspect replacement refs in $CLONE"
+  [ -z "$reps" ] \
+    && say "no replacement refs" \
+    || die "$CLONE contains git replacement refs ($(printf '%s' "$reps" | tr '\n' ' ')); refusing canonical install"
+  # --absolute-git-dir, because --git-path returns a path relative to the
+  # repository and testing it would resolve against the caller's cwd instead.
+  gd=$(git -C "$CLONE" rev-parse --absolute-git-dir 2>/dev/null) \
+    || die "could not locate the git directory of $CLONE"
+  [ -s "$gd/info/grafts" ] \
+    && die "$CLONE has a non-empty grafts file ($gd/info/grafts); refusing canonical install"
+  say "no grafts"
+}
+
+CANON=$(mktemp "${TMPDIR:-/tmp}/ladder-invariant.XXXXXX") \
+  || { echo "ABORT: could not create temporary file" >&2; exit 1; }
 cleanup() { rm -f "$CANON"; }
-trap cleanup EXIT INT TERM
+trap 'cleanup' EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
-# Extract the canonical invariant from the pinned INSTALL.md and verify its
-# checksum. Writes it to $CANON.
 invariant_extract() {
   python3 - "$CLONE/INSTALL.md" "$INV_SHA" "$CANON" <<'PY'
 import sys, hashlib
@@ -136,9 +161,8 @@ done
 # ---- step 2-3: clone / update, then detach at the pin -----------------
 step "2-3. Canonical checkout at $PIN"
 if [ -d "$CLONE/.git" ]; then
-  u=$(origin_url "$CLONE")
-  origin_ok "$u" || die "$CLONE origin is '${u:-<none>}', not this repository - refusing to touch it"
-  say "origin verified: $u"
+  verify_origin
+  refuse_history_rewrites
   status=$(git -C "$CLONE" status --porcelain 2>/dev/null) \
     || die "cannot inspect $CLONE status"
   [ -n "$status" ] && die "$CLONE has local modifications; resolve them first (not overwriting your work)"
@@ -147,15 +171,28 @@ else
   run mkdir -p "$(dirname "$CLONE")"
   run git clone --quiet "$REPO" "$CLONE"
 fi
+
 if [ "$DRY" -eq 0 ]; then
-  git -C "$CLONE" cat-file -e "$PIN^{commit}" 2>/dev/null || die "commit $PIN not found in $CLONE"
-  # Existing locally is not enough: require the pin to be reachable from the
-  # authoritative branch, so a stray local commit cannot masquerade as the pin.
-  git -C "$CLONE" merge-base --is-ancestor "$PIN" refs/remotes/origin/main 2>/dev/null \
+  # Unconditional: a fresh clone can be redirected by url.*.insteadOf, so the
+  # effective origin must be checked after cloning too, not only before.
+  verify_origin
+  refuse_history_rewrites
+  # GIT_NO_REPLACE_OBJECTS so these read real objects, not substituted ones.
+  GIT_NO_REPLACE_OBJECTS=1 git -C "$CLONE" cat-file -e "$PIN^{commit}" 2>/dev/null \
+    || die "commit $PIN not found in $CLONE"
+  GIT_NO_REPLACE_OBJECTS=1 git -C "$CLONE" merge-base --is-ancestor "$PIN" refs/remotes/origin/main 2>/dev/null \
     || die "$PIN is not an ancestor of origin/main - refusing to install an unreachable revision"
   say "pin reachable from origin/main"
   run git -C "$CLONE" checkout --quiet --detach "$PIN"
   say "detached at $(git -C "$CLONE" rev-parse HEAD)"
+  GIT_NO_REPLACE_OBJECTS=1 git -C "$CLONE" diff --quiet "$PIN" -- 2>/dev/null \
+    || die "checked-out tree differs from $PIN"
+  # The checker treats ignored content under skills/ as non-conforming; do not
+  # link a tree this installer's own acceptance definition would reject.
+  stow=$(git -C "$CLONE" status --porcelain --ignored -- skills/ 2>/dev/null) \
+    || die "could not inspect ignored content under skills/"
+  [ -n "$stow" ] && die "ignored content inside skills/ ($(printf '%s' "$stow" | tr '\n' ' ')); refusing to link it"
+  say "skill tree free of ignored content"
 fi
 
 # ---- step 4: symlink, never a copy ------------------------------------
