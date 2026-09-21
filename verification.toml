@@ -1,0 +1,19 @@
+# This repository's own policy. The Ladder verifies itself with it, which is the
+# only way a verification tool earns the right to say anything about other code.
+#
+# verify.py needs the standard library and git alone, so it must keep working on
+# the oldest interpreter it claims to support as well as the newest. CI runs the
+# suite under both; this checkout runs it under whichever is present, which is a
+# smoke test and not the required pair.
+required_gates = ["lint", "tests-py311", "tests-py314"]
+judgment_rungs = ["task", "diff", "self-review", "requirements", "architecture", "fresh-review"]
+ci_head_events = ["push"]
+
+[gates.local]
+lint = "uv run --with ruff==0.16.8 ruff check ."
+tests = "uv run --with pytest==9.1.1 python -m pytest -q"
+
+[ci_steps]
+lint = "Run uv run --with ruff==0.16.8 ruff check ."
+tests-py311 = "Run uv run --python 3.11 --with pytest==9.1.1 python -m pytest -q"
+tests-py314 = "Run uv run --python 3.14 --with pytest==9.1.1 python -m pytest -q"
