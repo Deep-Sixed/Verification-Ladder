@@ -26,8 +26,8 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 VERIFY = REPO / "skills" / "verification-ladder" / "bin" / "verify.py"
-AUTHORITY = {"schema": "verification.ladder.authority/1",
-             "authority": "verification.ladder.evidence/3"}
+SCHEMA_V3 = "verification.ladder.evidence/3"
+AUTHORITY = {"schema": "verification.ladder.authority/1", "authority": SCHEMA_V3}
 
 MUTATE = r"""sh -c 'printf mutated > src/app.txt'"""
 FLIP_RUNTIME = r"""sh -c 'printf {\"build\":\"B\"} > .verification/runtime.json'"""
@@ -46,7 +46,12 @@ def _project(tmp_path, policy, *, v3, files=None):
     root = tmp_path / "project"
     (root / "src").mkdir(parents=True)
     (root / "src" / "app.txt").write_text("original\n")
-    (root / "verification.toml").write_text(policy)
+    # A v3 project declares the contract it has adopted as well as carrying an
+    # activation record. Prepended, never appended: `policy` ends inside a
+    # [gates.local] table, so a key added after it parses as
+    # gates.local.evidence and declares nothing at all.
+    (root / "verification.toml").write_text(
+        (f'evidence = "{SCHEMA_V3}"\n' if v3 else "") + policy)
     (root / ".gitignore").write_text(".verification/\n")
     _git("init", "-q", ".", cwd=root)
     _git("config", "user.email", "t@t", cwd=root)
@@ -78,6 +83,25 @@ def _record(project):
 # --------------------------------------------------------------------------
 # The reproduction, both authorities, end to end.
 # --------------------------------------------------------------------------
+
+def test_a_v3_project_declares_the_contract_it_adopted(tmp_path):
+    """The fixture's own shape, asserted rather than assumed.
+
+    An activation record alone used to be a complete evidence/3 repository. It
+    is not: the contract is declared in the committed policy as well, so it
+    survives evidence cleanup and a fresh clone. These fixtures are built that
+    way, and this case fails if the declaration ever stops reaching the policy -
+    including by being appended into the trailing [gates.local] table, where it
+    parses as a gate key and silently declares nothing.
+    """
+    v3 = _project(tmp_path, _policy("true"), v3=True)
+    assert (v3 / "verification.toml").read_text().startswith(f'evidence = "{SCHEMA_V3}"')
+    assert json.loads((v3 / ".verification" / "authority.json").read_text()) == AUTHORITY
+
+    v2 = _project(tmp_path / "two", _policy("true"), v3=False)
+    assert "evidence =" not in (v2 / "verification.toml").read_text()
+    assert not (v2 / ".verification" / "authority.json").exists()
+
 
 @pytest.mark.parametrize("v3", [False, True], ids=["evidence2", "evidence3"])
 def test_a_gate_that_moves_the_tree_cannot_compose_clean(tmp_path, v3):
