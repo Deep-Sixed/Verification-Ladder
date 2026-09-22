@@ -6,7 +6,8 @@
 #
 # There is deliberately no --pin. Changing the pinned revision means changing
 # PIN and INV_SHA below, which is a reviewed change to this file rather than a
-# command-line argument that no reviewer sees.
+# command-line argument that no reviewer sees. CHECKER_SHA binds this installer
+# to the checker it was reviewed with, for the same reason.
 set -u
 
 PIN=760977f69d6b74b9888be4c9cbb404f7726bea73
@@ -21,6 +22,14 @@ CODEX_HOME=${CODEX_HOME:-$HOME/.codex}
 # scripts, so detaching to it removes them from $CLONE - including this file
 # while it is running. They are copied here first so the checker survives.
 BOOTSTRAP_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/verification-ladder
+# sha256 of the check-install.sh this installer was reviewed with. The two are
+# reviewed as a pair and preserved as a pair, so requiring the checker merely to
+# EXIST beside the installer accepts a new installer carrying an older, weaker
+# checker - both are then copied out and the weaker one is what anyone runs
+# afterwards. Changing check-install.sh means changing this constant in the same
+# commit; a mismatch is refused rather than reported, because the checker is the
+# only thing that would have caught it.
+CHECKER_SHA=09f65bcc7f81c91fea7ea1694b0f5a0d524974e35b3df2b2d334ef01c8ae0f1b
 SELF=$(readlink -f "$0" 2>/dev/null || echo "$0")
 SELF_DIR=$(dirname "$SELF")
 DO_CODEX=0; DRY=0; FORCE=0
@@ -172,6 +181,20 @@ preserve_bootstrap() {
   # would name a checker that was never preserved.
   [ -f "$SELF_DIR/check-install.sh" ] \
     || die "check-install.sh is not beside $SELF; refusing because $PIN does not contain it"
+  # Identity, not existence. Checked before the early return below, so a re-run
+  # from $BOOTSTRAP_DIR re-establishes the pair rather than trusting what an
+  # earlier run left there.
+  # Not piped into `cut`: `|| die` would then test the pipeline's last command,
+  # which exits 0 on empty input, and a failed digest would read as a mismatch
+  # or worse. Strip the filename with parameter expansion instead.
+  got=$(sha256sum "$SELF_DIR/check-install.sh" 2>/dev/null) \
+    || die "could not digest $SELF_DIR/check-install.sh"
+  got=${got%% *}
+  [ ${#got} -eq 64 ] || die "could not digest $SELF_DIR/check-install.sh"
+  [ "$got" = "$CHECKER_SHA" ] || die "check-install.sh beside $SELF is sha256:$got,
+    but this installer was reviewed against sha256:$CHECKER_SHA.
+    The installer and checker are one reviewed pair; install them from one revision."
+  say "checker matches the reviewed pair (sha256:$CHECKER_SHA)"
   if [ "$SELF_DIR" = "$BOOTSTRAP_DIR" ]; then
     say "already running from the bootstrap directory - nothing to copy"
     return 0
@@ -190,6 +213,7 @@ preserve_bootstrap() {
     echo "source-dir:      $SELF_DIR"
     echo "source-revision: $src_rev"
     echo "ladder-pin:      $PIN"
+    echo "checker-sha:     sha256:$CHECKER_SHA"
     for f in install-ladder.sh check-install.sh; do
       [ -f "$BOOTSTRAP_DIR/$f" ] && echo "$f: sha256:$(sha256sum "$BOOTSTRAP_DIR/$f" | cut -d" " -f1)"
     done

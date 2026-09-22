@@ -9,9 +9,24 @@ Every negative asserts its *specific* failure reason, not merely a nonzero
 exit. A wrong exit code with the right message is a passing test that proves
 nothing: an early version of the graft check aborted on clean clones for an
 unrelated reason, and only the message distinguished it from working.
+
+Most of this suite runs offline: the template clone is built from this
+repository's own history, so the pin needs no fetch. The cases that reach
+`git fetch origin` against the real GitHub origin are marked `network` and are
+the ones that fail without it. Run the offline subset with:
+
+    python -m pytest -m "not network"
+
+The split was measured, not assumed: under `unshare -rn` with commit signing
+disabled, `-m "not network"` passes 36/36 and `-m network` fails exactly the
+three marked cases, each at `git fetch origin`. That measurement belongs to the
+state that produced it; `test_network_surface_has_not_moved` below fails if the
+scripts grow another network call, which is the signal to re-measure.
 """
 
+import hashlib
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -30,11 +45,13 @@ def _git(*args, cwd, check=True):
                           capture_output=True, text=True)
 
 
-def _run(script, home, *args, codex_home=None, xdg=None):
+def _run(script, home, *args, codex_home=None, xdg=None, path_prefix=None):
     env = dict(os.environ)
     env["HOME"] = str(home)
     env["CODEX_HOME"] = str(codex_home or Path(home) / ".codex")
     env["XDG_DATA_HOME"] = str(xdg or Path(home) / ".local" / "share")
+    if path_prefix:
+        env["PATH"] = str(path_prefix) + os.pathsep + env["PATH"]
     return subprocess.run(["sh", str(script), *args], env=env, check=False,
                           capture_output=True, text=True)
 
@@ -339,6 +356,7 @@ def test_installer_refuses_dirty_clone(home):
     assert "not overwriting your work" in r.stderr
 
 
+@pytest.mark.network
 def test_installer_refuses_copy_instead_of_symlink(home):
     """Without --force-link a copied skill tree is never silently replaced."""
     link = home / ".claude" / "skills" / "verification-ladder"
@@ -361,6 +379,7 @@ def test_dry_run_without_a_clone_is_honest(tmp_path):
     assert "DRY-RUN INCOMPLETE" in r.stdout + r.stderr
 
 
+@pytest.mark.network
 def test_invariant_checksum_gate_fails_closed(home, tmp_path):
     """A pin moved without revalidating INV_SHA must not paste unreviewed text.
 
@@ -387,6 +406,7 @@ def test_invariant_checksum_gate_fails_closed(home, tmp_path):
         "refusing must leave global instructions untouched"
 
 
+@pytest.mark.network
 def test_unreachable_pin_is_refused_before_anything_is_written(home, tmp_path):
     """A stray local commit cannot stand in for the pin."""
     clone = home / "src" / "verification-ladder"
@@ -406,6 +426,104 @@ def test_unreachable_pin_is_refused_before_anything_is_written(home, tmp_path):
     r = _run(bin_dir / "install-ladder.sh", home)
     assert r.returncode == 1
     assert "not an ancestor of origin/main" in r.stderr
+
+
+# --------------------------------------------------------------------------
+# The pair: an installer and the checker it was reviewed with.
+# --------------------------------------------------------------------------
+
+def _checker_sha_in_installer():
+    m = re.search(r"^CHECKER_SHA=([0-9a-f]{64})$", INSTALLER.read_text(), re.MULTILINE)
+    assert m, "CHECKER_SHA constant not found in the installer"
+    return m.group(1)
+
+
+def test_checker_digest_constant_is_current():
+    """The constant is only worth anything while it names the committed checker.
+
+    Without this, editing check-install.sh and forgetting CHECKER_SHA leaves a
+    green suite and an installer that refuses its own repository's checker.
+    """
+    assert _checker_sha_in_installer() == hashlib.sha256(CHECKER.read_bytes()).hexdigest()
+
+
+def test_installer_refuses_a_checker_it_was_not_reviewed_with(tmp_path):
+    """Existence is not identity: a newer installer must not preserve an older checker.
+
+    Reproduced before the fix by pairing this installer with the checker from
+    05eb041 - 61 lines against 207 - which installed cleanly, exit 0. Both were
+    then copied to the bootstrap directory and the weaker one is what anyone
+    would have run afterwards.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shutil.copy(INSTALLER, bin_dir / "install-ladder.sh")
+    (bin_dir / "check-install.sh").write_text(CHECKER.read_text() + "# drifted\n")
+    drifted = hashlib.sha256((bin_dir / "check-install.sh").read_bytes()).hexdigest()
+
+    r = _run(bin_dir / "install-ladder.sh", tmp_path, "--dry-run")
+    assert r.returncode == 1
+    assert drifted in r.stderr
+    assert _checker_sha_in_installer() in r.stderr
+    assert "one reviewed pair" in r.stderr
+    assert not (tmp_path / ".local" / "share" / "verification-ladder").exists(), \
+        "must abort before creating the bootstrap directory"
+
+
+def test_matching_pair_passes_the_digest_check(tmp_path):
+    """The refusal above must be about the digest, not about running from a copy."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shutil.copy(INSTALLER, bin_dir / "install-ladder.sh")
+    shutil.copy(CHECKER, bin_dir / "check-install.sh")
+    r = _run(bin_dir / "install-ladder.sh", tmp_path, "--dry-run")
+    assert "checker matches the reviewed pair" in r.stdout
+    assert "one reviewed pair" not in r.stderr
+
+
+@pytest.mark.parametrize("stub, why", [
+    ("#!/bin/sh\nexit 1\n", "the tool fails"),
+    ("#!/bin/sh\nexit 0\n", "the tool succeeds but prints nothing"),
+])
+def test_digest_read_failure_is_not_a_mismatch(tmp_path, stub, why):
+    """A probe that could not run is not evidence, in either direction.
+
+    Reading the digest through `sha256sum | cut` would bind `|| die` to `cut`,
+    which exits 0 on empty input: a failed digest would then be compared as an
+    empty string and reported as a *mismatch*, blaming the checker for the
+    machine. Both modes must abort with the same honest reason instead.
+
+    Driven through PATH rather than by making the file unreadable, because the
+    suite may run as root, and root reads a chmod 000 file.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shutil.copy(INSTALLER, bin_dir / "install-ladder.sh")
+    shutil.copy(CHECKER, bin_dir / "check-install.sh")
+    stub_dir = tmp_path / "stub"
+    stub_dir.mkdir()
+    (stub_dir / "sha256sum").write_text(stub)
+    (stub_dir / "sha256sum").chmod(0o755)
+
+    r = _run(bin_dir / "install-ladder.sh", tmp_path, "--dry-run", path_prefix=stub_dir)
+    assert r.returncode == 1, why
+    assert "could not digest" in r.stderr, why
+    assert "one reviewed pair" not in r.stderr, "a failed probe must not read as a mismatch"
+    assert not (tmp_path / ".local" / "share" / "verification-ladder").exists()
+
+
+def test_network_surface_has_not_moved():
+    """Guard the assumption the markers rest on, not the markers themselves.
+
+    This cannot prove a marked case still needs the network - only a run under
+    denial does that, and it is recorded in the module docstring. What it can do
+    is fail when the scripts grow a second way to reach the network, which is
+    when that recorded measurement stops applying.
+    """
+    src = INSTALLER.read_text()
+    assert src.count("fetch --quiet origin") == 1, \
+        "the network surface moved; re-measure which cases reach it"
+    assert "git clone --quiet" in src
 
 
 def test_installer_and_checker_are_posix_sh(tmp_path):
