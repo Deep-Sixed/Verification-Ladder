@@ -385,6 +385,13 @@ def shadow_declaration(declared: dict) -> dict:
     for key in ("required_gates", "judgment_rungs", "ci_head_events"):
         if key in declared:
             view[key] = declared[key]
+    # Carried into the view because the baseline captures its completion contract
+    # from here. Left out, the expectations hashed at baseline and the ones hashed
+    # at composition were both empty, so widening them was invisible to governance
+    # - the one edit that most needs to be visible.
+    expectations = ci_expectations(declared)
+    if expectations:
+        view["ci"] = expectations
     base = declared.get("gates")
     authoritative = ((base.get("local") if isinstance(base, dict) else None) or {},
                      declared.get("ci_steps") or {})
@@ -425,6 +432,50 @@ def shadow_runtime(repo: Path, declared: dict) -> dict | None:
     if not isinstance(facts, dict) or not facts:
         return None
     return runtime_identity(facts)
+
+
+CI_IDENTITIES = ("repository", "workflow", "job")
+
+
+def ci_expectations(declared: dict) -> dict:
+    """Who must have produced a CI result for it to establish anything here.
+
+    Declared by the project, never read out of the payload under examination:
+    checking a run's workflow against the workflow that same run claims compares
+    a value with itself and passes for any payload at all.
+
+    `[ci]` is where this belongs. `[shadow.ci]` is still read, for policies
+    written while evidence/3 had no authority - but a requirement kept in a table
+    documented as establishing nothing is a requirement nobody treats as one.
+    """
+    for table in (declared.get("ci"), (declared.get(SHADOW_POLICY) or {}).get("ci")):
+        if isinstance(table, dict) and any(table.get(field) for field in CI_IDENTITIES):
+            return {field: table.get(field) for field in CI_IDENTITIES}
+    return {}
+
+
+def require_ci_expectations(declared: dict) -> dict:
+    """CI evidence without declared identities is unbindable, so refuse to make any.
+
+    A gate that only CI can run rests on a result from one repository, one
+    workflow and one job. With none of them declared, `ci_provenance_status` has
+    nothing to compare against and skips those links - and an unrelated
+    repository's run satisfies the gate. Optional here means absent in practice.
+    """
+    expected = ci_expectations(declared)
+    missing = [field for field in CI_IDENTITIES if not expected.get(field)]
+    if missing:
+        raise blocked(
+            "CI evidence needs the identities it must have come from, and this policy declares "
+            f"{', '.join(missing)} nowhere. Add them to verification.toml:\n\n"
+            "  [ci]\n"
+            '  repository = "owner/repo"\n'
+            '  workflow = ".github/workflows/ci.yml"\n'
+            '  job = "validate"\n\n'
+            "Declared here rather than read from the payload: a run checked against the workflow "
+            "that same run names compares a value with itself and passes for any payload at all."
+        )
+    return expected
 
 
 def shadow_target(repo: Path, declared: dict, repository: dict) -> dict:
@@ -689,6 +740,11 @@ def completion_contract(declared: dict) -> dict:
         "required_gates": list(declared.get("required_gates") or []),
         "judgment_rungs": list(declared.get("judgment_rungs") or []),
         "ci_head_events": list(declared.get("ci_head_events") or ["push"]),
+        # Which repository, workflow and job may establish a CI gate is a
+        # completion semantic, not a note. Widening it mid-task - to the fork the
+        # green run happens to be from - is exactly the edit that must surface as
+        # DEFINITION CHANGE PENDING rather than as a clean climb.
+        "ci": ci_expectations(declared),
     }
 
 
@@ -950,7 +1006,13 @@ def ci_provenance_status(run: dict, job: dict, expected: dict) -> tuple[str, str
     if attempts[0] != attempts[1]:
         return INADMISSIBLE, (f"job is from attempt {attempts[1]}, the run metadata is attempt "
                               f"{attempts[0]}")
-    if job.get("head_sha") and job["head_sha"] != sha:
+    # Not `if job.get("head_sha") and ...`: a job payload with no commit of its own
+    # then skipped the last link in the chain, and the importer discarded that
+    # field anyway, so the check compared the run's commit with itself.
+    if not job.get("head_sha"):
+        return INADMISSIBLE, ("job payload carries no head_sha, so the job cannot be bound to a "
+                              "commit; the run naming one establishes nothing about what the job ran")
+    if job["head_sha"] != sha:
         return INADMISSIBLE, f"job ran {job['head_sha'][:12]}, the run names {sha[:12]}"
     if expected.get("workflow") and run.get("path") != expected["workflow"]:
         return INADMISSIBLE, (f"run is workflow {run.get('path')!r}, the gate rests on "
@@ -1575,17 +1637,31 @@ def compare_ci_source(shadow: dict, authoritative: dict, declared: dict, governi
     # Declared, never taken from the payload under examination. Reading the
     # expected workflow out of the run that claims to be it makes the check
     # compare a value with itself, which passes for any payload at all.
-    expect = (declared.get(SHADOW_POLICY) or {}).get("ci") or {}
-    expected = {"head_sha": authoritative["repository"]["head"], "repository": expect.get("repository"),
-                "workflow": expect.get("workflow"), "job": expect.get("job"),
+    expected = {"head_sha": authoritative["repository"]["head"], **ci_expectations(declared),
                 "events": declared.get("ci_head_events") or ["push"]}
     run = {"id": source.get("run_id"), "head_sha": source.get("head_sha"), "event": source.get("event"),
            "run_attempt": source.get("run_attempt"), "path": source.get("workflow"),
            "repository": {"full_name": source.get("repository")}}
-    job = {"run_id": source.get("job_run_id"), "run_attempt": source.get("job_run_attempt", source.get("run_attempt")),
-           "head_sha": source.get("head_sha"), "name": source.get("job"),
+    # The job's OWN commit and attempt, never the run's. source["head_sha"] is
+    # the run's commit, and reading it here made the job-to-commit link compare a
+    # value with itself. Defaulting the attempt to source["run_attempt"] did the
+    # same thing one field over, and worse: it manufactured a value where the
+    # primitive would have refused a None, so the attempt link could report
+    # agreement over a record carrying no job-side attempt identity at all.
+    job = {"run_id": source.get("job_run_id"), "run_attempt": source.get("job_run_attempt"),
+           "head_sha": source.get("job_head_sha"), "name": source.get("job"),
            "steps": source.get("steps") or []}
-    status, why = ci_provenance_status(run, job, expected)
+    missing = [field for field in CI_IDENTITIES if not expected.get(field)]
+    if missing:
+        why = (f"this policy declares {', '.join(missing)} nowhere, so those links have nothing to "
+               f"be checked against; declare them in a [ci] table")
+        status = INADMISSIBLE
+    elif "job_head_sha" not in source:
+        why = ("this record predates job-commit binding: it carries no job_head_sha, so the job "
+               "cannot be bound to the commit. Re-run `verify.py import-ci`.")
+        status = INADMISSIBLE
+    else:
+        status, why = ci_provenance_status(run, job, expected)
     rows = [_row("-", "ci provenance", AGREE if status == ADMISSIBLE else DISAGREE,
                  source.get("run_id"), source.get("job_run_id"),
                  why or "repository, run, attempt, workflow, job, step and commit are one chain")]
@@ -1715,17 +1791,32 @@ def ci_status_for_v3(record: dict, declared: dict, repository: dict) -> list[str
     if record.get("authority") != "ci":
         return []
     source = record.get("source") or {}
-    expect = (declared.get(SHADOW_POLICY) or {}).get("ci") or {}
-    expected = {"head_sha": repository.get("head"), "repository": expect.get("repository"),
-                "workflow": expect.get("workflow"), "job": expect.get("job"),
+    expect = ci_expectations(declared)
+    missing = [field for field in CI_IDENTITIES if not expect.get(field)]
+    if missing:
+        return [(f"CI evidence cannot be bound: this policy declares {', '.join(missing)} nowhere. "
+                 "Add a [ci] table to verification.toml naming the repository, workflow and job "
+                 "that may establish a CI gate.")]
+    expected = {"head_sha": repository.get("head"), **expect,
                 "events": declared.get("ci_head_events") or ["push"]}
     run = {"id": source.get("run_id"), "head_sha": source.get("head_sha"), "event": source.get("event"),
            "run_attempt": source.get("run_attempt"), "path": source.get("workflow"),
            "repository": {"full_name": source.get("repository")}}
-    job = {"run_id": source.get("job_run_id"), "run_attempt": source.get("job_run_attempt", source.get("run_attempt")),
-           "head_sha": source.get("head_sha"), "name": source.get("job"), "steps": source.get("steps") or []}
+    findings = []
+    if "job_head_sha" not in source:
+        findings.append("CI record predates job-commit binding: it carries no job_head_sha, so the "
+                        "job cannot be bound to the commit. Re-run `verify.py import-ci`.")
+    # The job's OWN commit and attempt, never the run's. source["head_sha"] is
+    # the run's commit, and reading it here made the job-to-commit link compare a
+    # value with itself. Defaulting the attempt to source["run_attempt"] did the
+    # same thing one field over, and worse: it manufactured a value where the
+    # primitive would have refused a None, so the attempt link could report
+    # agreement over a record carrying no job-side attempt identity at all.
+    job = {"run_id": source.get("job_run_id"), "run_attempt": source.get("job_run_attempt"),
+           "head_sha": source.get("job_head_sha"), "name": source.get("job"), "steps": source.get("steps") or []}
     status, reason = ci_provenance_status(run, job, expected)
-    findings = [] if status == ADMISSIBLE else [reason]
+    if status != ADMISSIBLE:
+        findings.append(reason)
     for row in record.get("gates") or []:
         step = row.get("step")
         if step is None:
@@ -2397,9 +2488,27 @@ def command_import_ci(args) -> int:
             f"{'/'.join(accepted)} run for this commit instead."
         )
 
+    # The whole chain, before any record exists. An importer that writes a
+    # PASS-shaped record and leaves the links to be checked at composition has
+    # already produced the artifact someone will quote; the composer refusing it
+    # later is a second opinion, not a gate.
+    ci_gates = gate_map(declared, "ci_steps")
+    if ci_gates:
+        expected = require_ci_expectations(declared)
+        status, reason = ci_provenance_status(
+            {"id": run.get("id"), "head_sha": sha, "event": event,
+             "run_attempt": run.get("run_attempt"), "path": run.get("path"),
+             "repository": run.get("repository") or {}},
+            {"run_id": job.get("run_id"), "run_attempt": job.get("run_attempt"),
+             "head_sha": job.get("head_sha"), "name": job.get("name"),
+             "steps": job.get("steps") or []},
+            {**expected, "head_sha": sha, "events": accepted})
+        if status != ADMISSIBLE:
+            raise blocked(f"{args.job}: {reason}")
+
     conclusions = {step.get("name"): step.get("conclusion") for step in job.get("steps", [])}
     gates = []
-    for gate, step in gate_map(declared, "ci_steps").items():
+    for gate, step in ci_gates.items():
         conclusion = conclusions.get(step)
         entry = {"name": gate, "kind": EXECUTION, "step": step,
                  "status": CI_CONCLUSIONS.get(conclusion, BLOCKED)}
@@ -2423,6 +2532,10 @@ def command_import_ci(args) -> int:
               "run_id": run.get("id"), "run_attempt": run.get("run_attempt"),
               "workflow": run.get("path"), "job": job.get("name"),
               "job_run_id": job.get("run_id"), "job_run_attempt": job.get("run_attempt"),
+              # The job's OWN commit, kept separate from the run's. Dropping it
+              # left `ci_status_for_v3` rebuilding the job from the run's sha, so
+              # the commit link compared a value with itself and could not fail.
+              "job_head_sha": job.get("head_sha"),
               "event": event, "head_sha": sha,
               # The conclusions as given, not the statuses v2 derived from
               # them. Reading back a summary of an answer only establishes

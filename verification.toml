@@ -13,6 +13,15 @@ ci_head_events = ["push"]
 lint = "uv run --with ruff==0.16.8 ruff check ."
 tests = "uv run --with pytest==9.1.1 python -m pytest -q"
 
+# Which repository, workflow and job may establish a CI gate here. Required
+# whenever [ci_steps] declares one: without it the provenance chain has nothing
+# to check those links against and skips them, and a run from anywhere satisfies
+# the gate. Declared, never read from the payload under examination.
+[ci]
+repository = "Deep-Sixed/Verification-Ladder"
+workflow = ".github/workflows/ci.yml"
+job = "validate"
+
 [ci_steps]
 lint = "Run uv run --with ruff==0.16.8 ruff check ."
 tests-py311 = "Run uv run --python 3.11 --with pytest==9.1.1 python -m pytest -q"
