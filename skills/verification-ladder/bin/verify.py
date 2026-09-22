@@ -1620,11 +1620,13 @@ def compare_ci_source(shadow: dict, authoritative: dict, declared: dict, governi
     run = {"id": source.get("run_id"), "head_sha": source.get("head_sha"), "event": source.get("event"),
            "run_attempt": source.get("run_attempt"), "path": source.get("workflow"),
            "repository": {"full_name": source.get("repository")}}
-    # source["job_head_sha"], never source["head_sha"]: the latter is the RUN's
-    # commit, and reading it here made the job-to-commit link compare a value
-    # with itself. A record that does not carry the job's own commit cannot be
-    # bound, and says so rather than agreeing.
-    job = {"run_id": source.get("job_run_id"), "run_attempt": source.get("job_run_attempt", source.get("run_attempt")),
+    # The job's OWN commit and attempt, never the run's. source["head_sha"] is
+    # the run's commit, and reading it here made the job-to-commit link compare a
+    # value with itself. Defaulting the attempt to source["run_attempt"] did the
+    # same thing one field over, and worse: it manufactured a value where the
+    # primitive would have refused a None, so the attempt link could report
+    # agreement over a record carrying no job-side attempt identity at all.
+    job = {"run_id": source.get("job_run_id"), "run_attempt": source.get("job_run_attempt"),
            "head_sha": source.get("job_head_sha"), "name": source.get("job"),
            "steps": source.get("steps") or []}
     missing = [field for field in CI_IDENTITIES if not expected.get(field)]
@@ -1782,9 +1784,13 @@ def ci_status_for_v3(record: dict, declared: dict, repository: dict) -> list[str
     if "job_head_sha" not in source:
         findings.append("CI record predates job-commit binding: it carries no job_head_sha, so the "
                         "job cannot be bound to the commit. Re-run `verify.py import-ci`.")
-    # The job's own commit, never the run's. Reading source["head_sha"] here is
-    # what made `job.head_sha != sha` a self-comparison.
-    job = {"run_id": source.get("job_run_id"), "run_attempt": source.get("job_run_attempt", source.get("run_attempt")),
+    # The job's OWN commit and attempt, never the run's. source["head_sha"] is
+    # the run's commit, and reading it here made the job-to-commit link compare a
+    # value with itself. Defaulting the attempt to source["run_attempt"] did the
+    # same thing one field over, and worse: it manufactured a value where the
+    # primitive would have refused a None, so the attempt link could report
+    # agreement over a record carrying no job-side attempt identity at all.
+    job = {"run_id": source.get("job_run_id"), "run_attempt": source.get("job_run_attempt"),
            "head_sha": source.get("job_head_sha"), "name": source.get("job"), "steps": source.get("steps") or []}
     status, reason = ci_provenance_status(run, job, expected)
     if status != ADMISSIBLE:

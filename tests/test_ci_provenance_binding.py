@@ -150,6 +150,7 @@ def test_the_fixture_declares_the_contract_it_carries(project):
     pytest.param({"job": "some-other-job"}, "the gate rests on", id="another-job"),
     pytest.param({"job_run_id": 9999}, "a job from another run", id="job-from-another-run"),
     pytest.param({"job_run_attempt": 2}, "is from attempt 2", id="another-attempt"),
+    pytest.param({"job_run_attempt": None}, "cannot bind job to run attempt", id="no-job-attempt"),
 ])
 def test_a_broken_chain_is_refused_before_any_record_exists(project, over, because):
     code, output, target = import_ci(project, **over)
@@ -161,7 +162,13 @@ def test_a_broken_chain_is_refused_before_any_record_exists(project, over, becau
 @pytest.mark.parametrize("project", [False, True], ids=["evidence2", "evidence3"], indirect=True)
 def test_a_policy_with_no_declared_authority_cannot_import(project):
     """Optional expectations meant the links were simply not checked."""
-    (project / "verification.toml").write_text(ADOPTION + POLICY.split("[ci]")[0])
+    # Conditional, like the fixture: writing ADOPTION for both arms turns the
+    # nominal evidence2 case into an adopted-but-not-activated one once the
+    # v3-adoption package lands, and this case stops demonstrating that an
+    # ordinary default project with no CI identities is refused.
+    adopted = (project / ".verification" / "authority.json").exists()
+    (project / "verification.toml").write_text(
+        (ADOPTION if adopted else "") + POLICY.split("[ci]")[0])
     code, output, target = import_ci(project)
     assert code == 2, output
     assert "declares repository, workflow, job nowhere" in output
@@ -204,19 +211,45 @@ def test_a_record_edited_after_import_is_still_refused(project):
     assert "READY FOR HUMAN GATE     FALSE" in output
 
 
+@pytest.mark.parametrize(("field", "because"), [
+    pytest.param("job_head_sha", "predates job-commit binding", id="commit"),
+    pytest.param("job_run_attempt", "cannot bind job to run attempt", id="attempt"),
+])
 @pytest.mark.parametrize("project", [True], ids=["evidence3"], indirect=True)
-def test_a_record_predating_job_commit_binding_is_refused(project):
-    """The shape every record written by an earlier verifier has.
+def test_a_record_missing_a_job_side_identity_is_refused(project, field, because):
+    """Absent is not evidence of a match, for either job-side identity.
 
-    It must not read as agreeing: the field it needs is absent, and absent is
-    not evidence of a match.
+    Both were read from the run's copy of the same thing. `job_head_sha` was
+    never stored at all; `job_run_attempt` was stored but read as
+    `get(k, source["run_attempt"])`, so deleting it from a record substituted
+    the run's attempt and the link compared a value with itself. Worse than the
+    commit case: `ci_provenance_status` refuses a None attempt on its own, and
+    the fallback manufactured a value before it could.
     """
     assert import_ci(project)[0] == 0
-    rewrite_source(project, job_head_sha=None)
+    assert rewrite_source(project, **{field: None})
     code, output = cli(project, "compose", str(project / ".verification" / "ci.json"))
-    assert code != 0
-    assert "predates job-commit binding" in output
+    assert code != 0, output
+    assert because in output, output
     assert "READY FOR HUMAN GATE     FALSE" in output
+
+
+@pytest.mark.parametrize("project", [True], ids=["evidence3"], indirect=True)
+def test_no_job_side_identity_is_read_from_the_run(project):
+    """The control for both: neither field may be defaulted from its run twin.
+
+    Asserted on the record rather than on a verdict, because a reader that
+    substitutes the run's value produces a record that passes every behavioural
+    check for the wrong reason.
+    """
+    assert import_ci(project)[0] == 0
+    source = record_of(project)["source"]
+    for job_side, run_side in (("job_head_sha", "head_sha"), ("job_run_attempt", "run_attempt")):
+        assert job_side in source, f"{job_side} must be preserved, not re-derived from {run_side}"
+    reader = (Path(__file__).resolve().parents[1] / "skills" / "verification-ladder" / "bin"
+              / "verify.py").read_text()
+    assert 'source.get("job_run_attempt", source.get("run_attempt"))' not in reader
+    assert 'source.get("job_head_sha", source.get("head_sha"))' not in reader
 
 
 @pytest.mark.parametrize("project", [True], ids=["evidence3"], indirect=True)

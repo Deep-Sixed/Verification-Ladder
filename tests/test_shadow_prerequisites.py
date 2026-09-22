@@ -324,6 +324,26 @@ def test_the_provenance_chain_is_checked_again_at_composition(repo, label, over,
     assert because in detail, f"{label}: {detail}"
 
 
+def test_a_record_without_the_job_attempt_cannot_be_bound(repo):
+    """The comparison path reads the job's own attempt, never the run's.
+
+    It was `source.get("job_run_attempt", source.get("run_attempt"))`, so a
+    record with the field deleted was compared against the run's attempt - a
+    value with itself - and the link reported agreement over no job-side attempt
+    identity at all. `ci_provenance_status` refuses a None here; the fallback
+    manufactured a value before it could.
+    """
+    record = payload(repo)
+    path = repo / ".verification" / "shadow" / "ci.v3.json"
+    shadow = json.loads(path.read_text())
+    assert "job_run_attempt" in shadow["source"], "the importer must preserve it"
+    del shadow["source"]["job_run_attempt"]
+    path.write_text(json.dumps(shadow, indent=2))
+    outcome, detail, _ = row(repo, record, "ci provenance")
+    assert outcome == "DISAGREE", detail
+    assert "cannot bind job to run attempt" in detail
+
+
 def test_a_record_without_the_job_commit_cannot_be_bound(repo):
     """Records written before the job's own commit was preserved must not compose.
 
