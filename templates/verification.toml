@@ -37,6 +37,22 @@ ci_head_events = ["push"]
 lint = "ruff check ."
 tests = "python -m pytest -q"
 
+# Which repository, workflow and job may establish a CI gate. REQUIRED whenever
+# [ci_steps] below declares one: `import-ci` refuses a payload it cannot bind,
+# and with these undeclared there is nothing to bind the repository, workflow and
+# job links against - so a green run from an unrelated repository satisfies the
+# gate. Declared here rather than read from the payload: checking a run's
+# workflow against the workflow that same run claims compares a value with
+# itself and passes for any payload at all.
+#
+# Changing these is a completion-contract change, and composition reports
+# DEFINITION CHANGE PENDING rather than a clean climb - repointing this at the
+# fork a green run happens to come from is exactly the edit that needs review.
+[ci]
+repository = "acme/widget"
+workflow = ".github/workflows/ci.yml"
+job = "validate"
+
 # Gates only CI can establish, mapped to the workflow step that establishes each.
 # The step name is what the Actions API reports: an unnamed `run:` step appears
 # as "Run <command>". Several gates may rest on one step when that step runs
@@ -87,11 +103,7 @@ tests = "Run python -m pytest -q"
 # spec_files = ["docs/journeys/login.md"]
 # artifacts = [".verification/artifacts/login-journey.json"]
 
-# What a CI record must have come from, for the evidence/3 provenance chain.
-# Declared here rather than read out of the payload under examination: checking
-# a run's workflow against the workflow that same run claims compares a value
-# with itself, which passes for any payload at all.
-# [shadow.ci]
-# repository = "acme/widget"
-# workflow = ".github/workflows/ci.yml"
-# job = "validate"
+# [shadow.ci] used to hold the provenance expectations and is still read, for
+# policies written while evidence/3 had no authority. Prefer the [ci] table
+# above: a requirement kept in a section documented as establishing nothing is a
+# requirement nobody treats as one, and it was optional for exactly that reason.

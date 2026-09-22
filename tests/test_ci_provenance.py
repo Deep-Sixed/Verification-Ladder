@@ -100,6 +100,22 @@ def test_a_missing_run_id_is_unverifiable_not_waved_through():
     assert "no run id" in reason
 
 
+def test_a_job_without_head_sha_binds_to_nothing():
+    """The last link, and the one the importer used to discard.
+
+    `if job.get("head_sha") and job["head_sha"] != sha` skipped this link
+    entirely for a job that carried no commit - and since the importer stored
+    only the run's, the value that did reach the check was the run's own, so the
+    comparison could not fail either way. Both callers now refuse such a record
+    before reaching here; this is the floor beneath them, and it is asserted
+    directly so that removing it is visible rather than masked.
+    """
+    status, reason = verify.ci_provenance_status(_run(), _job(head_sha=None), EXPECTED)
+    assert status == verify.INADMISSIBLE
+    assert "job payload carries no head_sha" in reason
+    assert "establishes nothing about what the job ran" in reason
+
+
 def test_a_run_without_head_sha_binds_to_nothing():
     status, reason = verify.ci_provenance_status(_run(head_sha=None), _job(), EXPECTED)
     assert status == verify.INADMISSIBLE

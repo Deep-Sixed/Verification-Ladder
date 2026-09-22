@@ -30,6 +30,11 @@ lint = "true"
 
 [ci_steps]
 container-build = "Run docker build ."
+
+[ci]
+repository = "acme/widget"
+workflow = ".github/workflows/ci.yml"
+job = "validate"
 """
 
 
@@ -56,15 +61,26 @@ def run(repo, *args):
     return result.returncode, result.stdout + result.stderr
 
 
-def ci_payloads(tmp_path, repo, *, conclusion="success", step="Run docker build .", sha=None, event="push"):
-    """The two Actions payloads an agent fetches: the run, and the job with its steps."""
+def ci_payloads(tmp_path, repo, *, conclusion="success", step="Run docker build .", sha=None,
+                event="push", job_sha=None):
+    """The two Actions payloads an agent fetches: the run, and the job with its steps.
+
+    Complete, because the importer now requires the whole chain. The earlier
+    fixtures carried a run with no workflow or repository and a job with nothing
+    but steps, which is exactly the payload that used to satisfy a CI-only gate.
+    """
     head = sha or verify.head_sha(repo)
     run_path, job_path = tmp_path / "run.json", tmp_path / "job.json"
     run_path.write_text(json.dumps({
         "id": 35472429403, "event": event, "head_sha": head, "head_branch": "main",
+        "run_attempt": 1, "path": ".github/workflows/ci.yml",
+        "repository": {"full_name": "acme/widget"},
         "conclusion": "success", "html_url": "https://github.invalid/run/1",
     }))
-    job_path.write_text(json.dumps({"steps": [{"name": step, "conclusion": conclusion}]}))
+    job_path.write_text(json.dumps({
+        "id": 5510, "run_id": 35472429403, "run_attempt": 1,
+        "head_sha": job_sha or head, "name": "validate",
+        "steps": [{"name": step, "conclusion": conclusion}]}))
     return run_path, job_path
 
 
