@@ -17,13 +17,18 @@ required gate and reported READY FOR HUMAN GATE TRUE.
 import json
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "skills" / "verification-ladder" / "bin" / "verify.py"
-AUTHORITY = {"schema": "verification.ladder.authority/1",
-             "authority": "verification.ladder.evidence/3"}
+SCHEMA_V3 = "verification.ladder.evidence/3"
+AUTHORITY = {"schema": "verification.ladder.authority/1", "authority": SCHEMA_V3}
+# A v3 project declares the contract it adopted as well as carrying an
+# activation record. PREPENDED wherever it is used: POLICY ends inside a [ci]
+# table, so a key added after it parses as ci.evidence and declares nothing.
+ADOPTION = f'evidence = "{SCHEMA_V3}"\n'
 OTHER_COMMIT = "0" * 40
 
 POLICY = '''required_gates = ["ci-only"]
@@ -52,7 +57,7 @@ def project(tmp_path, request):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / ".gitignore").write_text(".verification/\n")
-    (repo / "verification.toml").write_text(POLICY)
+    (repo / "verification.toml").write_text((ADOPTION if v3 else "") + POLICY)
     (repo / "src.txt").write_text("src\n")
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
@@ -120,6 +125,23 @@ def rewrite_source(repo, **over):
 # The importer refuses before it writes.
 # --------------------------------------------------------------------------
 
+@pytest.mark.parametrize("project", [True, False], ids=["evidence3", "evidence2"], indirect=True)
+def test_the_fixture_declares_the_contract_it_carries(project):
+    """The fixture's own shape, asserted rather than assumed.
+
+    An activation record alone used to be a complete evidence/3 repository. It
+    is not: the contract is declared in the committed policy too, so it survives
+    evidence cleanup and a fresh clone. This fails if the declaration ever stops
+    reaching the policy - including by being appended into the trailing [ci]
+    table, where it parses as a CI expectation and declares nothing at all.
+    """
+    policy = (project / "verification.toml").read_text()
+    activated = (project / ".verification" / "authority.json").exists()
+    assert tomllib.loads(policy).get("evidence") == (SCHEMA_V3 if activated else None)
+    if activated:
+        assert policy.startswith(ADOPTION), "a key after a table header belongs to that table"
+
+
 @pytest.mark.parametrize("project", [False, True], ids=["evidence2", "evidence3"], indirect=True)
 @pytest.mark.parametrize(("over", "because"), [
     pytest.param({"job_head_sha": OTHER_COMMIT}, "job ran 000000000000", id="job-ran-another-commit"),
@@ -139,7 +161,7 @@ def test_a_broken_chain_is_refused_before_any_record_exists(project, over, becau
 @pytest.mark.parametrize("project", [False, True], ids=["evidence2", "evidence3"], indirect=True)
 def test_a_policy_with_no_declared_authority_cannot_import(project):
     """Optional expectations meant the links were simply not checked."""
-    (project / "verification.toml").write_text(POLICY.split("[ci]")[0])
+    (project / "verification.toml").write_text(ADOPTION + POLICY.split("[ci]")[0])
     code, output, target = import_ci(project)
     assert code == 2, output
     assert "declares repository, workflow, job nowhere" in output
@@ -212,7 +234,8 @@ def test_widening_the_accepted_authority_is_a_definition_change(project):
     assert import_ci(project)[0] == 0
     assert "READY FOR HUMAN GATE     TRUE" in cli(project, "compose",
                                                   str(project / ".verification" / "ci.json"))[1]
-    (project / "verification.toml").write_text(POLICY.replace("acme/widget", "evil/fork"))
+    (project / "verification.toml").write_text(
+        ADOPTION + POLICY.replace("acme/widget", "evil/fork"))
     code, output = cli(project, "compose", str(project / ".verification" / "ci.json"))
     assert "DEFINITION CHANGE PENDING" in output, output
     assert "completion contract changed" in output
