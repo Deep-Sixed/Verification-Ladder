@@ -4,6 +4,16 @@
 #
 # A repository with no policy is BLOCKED, never silently verified.
 
+# Which evidence contract decides here. Omit it for the default,
+# "verification.ladder.evidence/2". Adopting evidence/3 takes this line AND an
+# activation record in each checkout (`verify.py qualify`, then
+# `verify.py activate`) - the line is committed so the contract survives
+# `rm -rf .verification` and a fresh clone, and the record is not, because
+# qualification is a property of a working copy rather than of a commit. With
+# the line and no record, evidence is still produced and marked pre-activation,
+# and `compose` is BLOCKED until you activate.
+# evidence = "verification.ladder.evidence/3"
+
 # Gates that must PASS by EXECUTION. An agent attestation can never satisfy one -
 # that is the difference between "a check ran" and "an agent believes it would
 # have passed". Name every gate here, including the ones only CI can run.

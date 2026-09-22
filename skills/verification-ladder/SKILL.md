@@ -139,6 +139,16 @@ An attestation is not an execution and never satisfies a required gate. Saying
 "I reviewed the diff" is evidence about your attention, not about the code; the
 composite prints the distinction rather than hiding it.
 
+Which evidence contract decides is the project's choice, declared in its policy
+as `evidence = "..."` and defaulting to `verification.ladder.evidence/2`. A
+project that has adopted `verification.ladder.evidence/3` also needs an
+activation record in this checkout, written by `verify.py activate` over
+evidence that `verify.py qualify` accepts; `verify.py baseline` comes first,
+before the task changes what its gates mean. Until both are in place, records
+are marked pre-activation and `compose` is BLOCKED rather than answering under
+the contract the project has left behind. `references/evidence.md` has the
+table of states and what each one refuses.
+
 Records are operational evidence, not repository content: keep them under
 `.verification/` and quote from them in the report instead of committing them.
 That directory must be git-ignored, along with whatever caches the project's

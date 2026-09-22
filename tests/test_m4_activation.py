@@ -19,6 +19,10 @@ sys.exit(0)
 POLICY = '''required_gates = ["unit", "verify-login"]
 judgment_rungs = ["diff"]
 ci_head_events = ["push"]
+# The contract this project has ADOPTED, committed so it survives `rm -rf
+# .verification` and a fresh clone. `activate` refuses to write a declaration the
+# policy does not carry, because such an activation is lost with the directory.
+evidence = "verification.ladder.evidence/3"
 
 [gates.local]
 unit = "true"
