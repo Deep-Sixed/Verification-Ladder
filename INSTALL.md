@@ -12,6 +12,9 @@ the composite means nothing.
 git clone https://github.com/Deep-Sixed/verification-ladder ~/src/verification-ladder
 ```
 
+The sequence below is the one to read; [The scripted install](#the-scripted-install)
+runs the same steps and checks the result.
+
 ## Claude Code
 
 Personal skills live in `~/.claude/skills/<name>/`. Link, do not copy:
@@ -177,3 +180,57 @@ python ~/src/verification-ladder/skills/verification-ladder/bin/verify.py --repo
 
 A repository with no policy should exit 2 and tell you so. That is the install
 working, not failing.
+
+## The scripted install
+
+`scripts/install-ladder.sh` performs everything above - the clone, the detached
+pin, the symlinks and the invariant - and `scripts/check-install.sh` reports
+whether the result conforms. It works against an established workstation: it
+never overwrites existing global instructions, and it refuses rather than
+guesses when it finds something it did not put there.
+
+```sh
+git clone https://github.com/Deep-Sixed/verification-ladder /tmp/ladder-bootstrap
+sh /tmp/ladder-bootstrap/scripts/install-ladder.sh      # --codex to install for Codex too
+```
+
+`--dry-run` prints the sequence without performing it. Note that it can only
+validate the invariant step once `~/src/verification-ladder` exists, and says so
+rather than reporting a success it did not establish.
+
+### Where the bootstrap tooling lives
+
+Neither script is in the pinned checkout. The pin predates `scripts/`, so
+detaching `~/src/verification-ladder` to it *removes both scripts from that
+directory* - including `install-ladder.sh` while it is running. The installer
+therefore copies the pair out first, to
+
+```
+${XDG_DATA_HOME:-~/.local/share}/verification-ladder/
+    install-ladder.sh
+    check-install.sh
+    PROVENANCE
+```
+
+and names that path in its closing message. Run the checker from there:
+
+```sh
+~/.local/share/verification-ladder/check-install.sh     # --codex to check Codex too
+```
+
+`PROVENANCE` records where the pair was copied from, the source revision, the
+ladder pin, and a sha256 for each script. Once copied out of a checkout these
+files have no other identity, which is what that file exists to supply.
+
+This is the deliberate split. The **Ladder runtime** is a pinned, immutable
+checkout at `~/src/verification-ladder`. The **installer and checker** are
+bootstrap tooling from a newer reviewed revision, versioned independently and
+kept outside it. They are nonetheless one reviewed *pair*: the installer carries
+the expected sha256 of its checker and refuses to run beside a different one, so
+a newer installer cannot quietly preserve an older, weaker checker for everyone
+to run afterwards.
+
+`check-install.sh` establishes installation integrity and nothing more. It does
+not establish that an agent invokes the Ladder during ordinary work - that is
+the policy-less `BLOCKED` test, and it is the property that can regress silently
+after a good install.

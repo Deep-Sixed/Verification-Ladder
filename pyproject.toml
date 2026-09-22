@@ -18,6 +18,11 @@ dev = ["pytest==9.1.1", "ruff==0.16.8"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# `network` marks the install cases that reach `git fetch origin` against the
+# real GitHub origin. Everything else runs offline, so an air-gapped or
+# network-denied run is `pytest -m "not network"` rather than a guess at which
+# failures are environmental.
+markers = ["network: requires a live fetch from the GitHub origin"]
 
 [tool.ruff]
 line-length = 120
