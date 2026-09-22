@@ -433,6 +433,28 @@ def shadow_target(repo: Path, declared: dict, repository: dict) -> dict:
     return {"repository": repository, **({"runtime": runtime} if runtime else {})}
 
 
+def target_drift(before: dict, after: dict) -> list[str]:
+    """Which declared dimensions of the target moved while the gates ran.
+
+    Named rather than reduced to a flag. "The worktree moved" and "the runtime
+    manifest was replaced" are different failures with different repairs, and a
+    single boolean sends the reader looking for the wrong one. Dimensions present
+    in only one of the two are reported too: a runtime that became unreadable
+    mid-run is a change in what the evidence could bind to.
+    """
+    moved = []
+    for dimension in sorted(set(before) | set(after)):
+        left, right = before.get(dimension), after.get(dimension)
+        if left == right:
+            continue
+        if dimension == "repository" and isinstance(left, dict) and isinstance(right, dict):
+            moved += [f"repository.{key}" for key in sorted(set(left) | set(right))
+                      if left.get(key) != right.get(key)]
+        else:
+            moved.append(dimension)
+    return moved
+
+
 # --- verification.ladder.evidence/3 model -------------------------------------
 #
 # Parsing, validation and identity for the v3 schema. Nothing here changes what
@@ -1756,6 +1778,21 @@ def command_compose_v3(args) -> int:
         if (record.get("target_state") or {}).get("repository", {}).get("worktree_state") == composed_state)
 
     findings = []
+    # Before any per-gate reading. A record whose own verdict refused it cannot
+    # be rehabilitated by the rows inside it: a drifted run has passing gates by
+    # construction - they are what moved the tree - and reading only the rows
+    # composed the exact record the runner had already blocked. Checked here
+    # rather than relying on the state binding to disagree: binding is what
+    # caught this in v2, incidentally, and an incidental protection is one nobody
+    # is maintaining.
+    for path, record in zip(paths, records, strict=True):
+        if record.get("drift"):
+            moved = ", ".join(record.get("drift_dimensions") or []) or "the target"
+            findings.append(f"{path.name}: DRIFT - {moved} changed while the gates ran, so this "
+                            f"record establishes nothing about any single state")
+        elif record.get("verdict") in (BLOCKED, FAIL):
+            findings.append(f"{path.name}: record verdict is {record['verdict']}; a refused "
+                            f"execution is not evidence for the gates inside it")
     status, reason = verifier_status(records)
     if status != ADMISSIBLE:
         findings.append(reason)
@@ -2170,12 +2207,22 @@ def command_run(args) -> int:
     output = Path(args.output).resolve() if args.output else None
     exclude = relative_inside(repo, [output])
 
-    before = state_id(repo, exclude)
+    # Captured BEFORE the gates run. Evidence binds to the state the gates were
+    # measuring, not to whatever they left behind: binding after execution makes
+    # a gate that writes into the tree describe its own output, and the record
+    # then matches the checkout exactly because the gate put it there.
+    before_target = shadow_target(repo, declared, repository_identity(repo, exclude))
+    before = before_target["repository"]["worktree_state"]
     before_paths = state_paths(repo, exclude)
     dirty = is_dirty(repo, exclude)
     results = [run_gate(repo, name, command) for name, command in gates]
-    after = state_id(repo, exclude)
+    after_target = shadow_target(repo, declared, repository_identity(repo, exclude))
+    after = after_target["repository"]["worktree_state"]
     drift = before != after
+    # Wider than `drift`: the worktree digest cannot see a staged change or a
+    # replaced runtime manifest, and a gate that moves either has still measured
+    # one state and left another.
+    moved_dimensions = target_drift(before_target, after_target)
 
     record = new_record(repo, "local", results, exclude, state=before,
                         gate_set="policy" if not args.gate else "custom")
@@ -2188,13 +2235,18 @@ def command_run(args) -> int:
         # is .gitignore rather than the change under verification.
         record["drift_paths"] = sorted({path for _, path in before_paths ^ state_paths(repo, exclude)})
     if authority_active(repo):
+        v3_drift = bool(moved_dimensions)
+        v3_verdict = verdict_of(results, v3_drift)
+        after_state = {"target_state_after": after_target,
+                       "drift_dimensions": moved_dimensions,
+                       "drift_paths": record.get("drift_paths", [])} if v3_drift else {}
         direct = make_authoritative_v3(shadow_record(
-            repo, declared, results, "local",
-            shadow_target(repo, declared, repository_identity(repo, exclude)),
-            recorded_at=record["recorded_at"], drift=drift, gate_set=record["gate_set"]), record["verdict"])
+            repo, declared, results, "local", before_target,
+            recorded_at=record["recorded_at"], drift=v3_drift, gate_set=record["gate_set"],
+            **after_state), v3_verdict)
         emit(direct, output)
         summarize_v3_record(direct, output, file=sys.stderr)
-        return EXIT[record["verdict"]]
+        return EXIT[v3_verdict]
 
     emit(record, output)
     summarize(record, output, file=sys.stderr)
@@ -2202,9 +2254,11 @@ def command_run(args) -> int:
     # shadow record describes the same `results`, so no gate runs twice, and
     # nothing below can change what was just reported.
     emit_shadow(repo, output, lambda: shadow_record(
-        repo, declared, results, "local",
-        shadow_target(repo, declared, repository_identity(repo, exclude)),
-        recorded_at=record["recorded_at"], drift=drift, gate_set=record["gate_set"]))
+        repo, declared, results, "local", before_target,
+        recorded_at=record["recorded_at"], drift=bool(moved_dimensions),
+        gate_set=record["gate_set"],
+        **({"target_state_after": after_target, "drift_dimensions": moved_dimensions,
+            "drift_paths": record.get("drift_paths", [])} if moved_dimensions else {})))
     return EXIT[record["verdict"]]
 
 
@@ -2463,6 +2517,18 @@ def command_compose(args) -> int:
     rows = compose_rows(records)
     declared = policy(repo)
     findings = completion_findings(rows, declared)
+    # v2 has always caught a drifted run, but only because its evidence binds to
+    # the pre-execution state and the gate's own output then moves the checkout
+    # away from it - a state mismatch, reported as staleness. That is the right
+    # answer for the wrong reason, and it disappears the moment anything restores
+    # the tree. Say it directly.
+    for path, record in zip(paths, records, strict=True):
+        if record.get("drift"):
+            findings.append(f"{path.name}: DRIFT - the repository changed while the gates ran, so "
+                            f"this record establishes nothing about any single state")
+        elif record.get("verdict") in (BLOCKED, FAIL):
+            findings.append(f"{path.name}: record verdict is {record['verdict']}; a refused "
+                            f"execution is not evidence for the gates inside it")
     stale = composed_state != current
     verdict = STALE if stale else (INCOMPLETE if findings else COMPLETE)
 
@@ -2528,6 +2594,21 @@ def summarize_v3_record(record: dict, path: Path | None, *, file) -> None:
         detail = gate.get("reason") or gate.get("note") or (
             f"exit {gate['exit_code']}" if "exit_code" in gate else gate.get("step", gate["kind"]))
         print(f"  {gate['status']:<7} {gate['gate']} ({detail})", file=file)
+    # The v2 summary has explained drift since the beginning; the v3 summary
+    # printed BLOCKED and nothing else, so the one line a reader needed in order
+    # to know WHY was missing exactly where the verdict was hardest to act on.
+    if record.get("drift"):
+        after = ((record.get("target_state_after") or {}).get("repository") or {}).get("worktree_state")
+        print("  drift    target changed while gates ran; results bind to no single state", file=file)
+        for dimension in record.get("drift_dimensions") or []:
+            print(f"           moved  {dimension}", file=file)
+        if after and after != repository.get("worktree_state"):
+            print(f"           after  {after}", file=file)
+        for changed in record.get("drift_paths") or []:
+            print(f"           path   {changed}", file=file)
+        print("           this record binds to the state the gates MEASURED, not the one they\n"
+              "           left. Git-ignore disposable tool output; if a gate changed real\n"
+              "           repository state, BLOCKED is the right answer.", file=file)
     if path:
         print(f"  evidence {path}", file=file)
 
