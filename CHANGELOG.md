@@ -29,11 +29,11 @@ What changed what admissible means:
   rather than read as evidence/2. Qualification is scoped to the predicates the
   consumer's own policy puts in play.
 
-Installation (#2): `scripts/install-ladder.sh` and `scripts/check-install.sh`
-install and check a pinned checkout. **Their pin still names `760977f`**, which
-predates everything above and still reports `evidence-v3.1`. Moving the pin to
-this release is a separate change, because the installer refuses a pin that is
-not already on `main`.
+Installation (#2, #7): `scripts/install-ladder.sh` and `scripts/check-install.sh`
+install and check a pinned checkout. #7 moves their pin from `760977f`, which
+predates everything above and reports `evidence-v3.1`, to `c86bf47`, the commit
+that released this contract. It had to be a separate change because the
+installer refuses a pin that is not already on `main`.
 
 ## 0.2.0 — contract `evidence-v3.1`
 

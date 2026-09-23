@@ -8,7 +8,7 @@
 # repository with no verification policy.
 set -u
 
-PIN=760977f69d6b74b9888be4c9cbb404f7726bea73
+PIN=c86bf47e70d7a3aa18c968011b487190e2becbea
 INV_SHA=282f21173aad9815a22a6ece35ad0fdd42653dd7a001dc6d85e6d51189aa5699
 CLONE=$HOME/src/verification-ladder
 LINK=$HOME/.claude/skills/verification-ladder
@@ -30,7 +30,8 @@ fail() { echo "FAIL  $1"; rc=1; }
 ok()   { echo "ok    $1"; }
 note() { echo "note  $1"; }
 
-# These scripts live outside the pinned checkout, because $PIN predates them.
+# These scripts live outside the pinned checkout: the scripts/ inside it are
+# $PIN's own, older pair, reviewed with an older pin, and are not this checker.
 # Report where this copy came from: once detached from its source commit it has
 # no other identity. Informational - running from a branch checkout is valid.
 BOOTSTRAP_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/verification-ladder

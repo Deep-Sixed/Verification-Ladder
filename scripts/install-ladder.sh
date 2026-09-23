@@ -10,7 +10,7 @@
 # to the checker it was reviewed with, for the same reason.
 set -u
 
-PIN=760977f69d6b74b9888be4c9cbb404f7726bea73
+PIN=c86bf47e70d7a3aa18c968011b487190e2becbea
 REPO=https://github.com/Deep-Sixed/Verification-Ladder
 # sha256 of the invariant block in INSTALL.md at $PIN. Moving the pin without
 # revalidating this makes the installer fail closed rather than paste unknown
@@ -18,9 +18,10 @@ REPO=https://github.com/Deep-Sixed/Verification-Ladder
 INV_SHA=282f21173aad9815a22a6ece35ad0fdd42653dd7a001dc6d85e6d51189aa5699
 CLONE=$HOME/src/verification-ladder
 CODEX_HOME=${CODEX_HOME:-$HOME/.codex}
-# Bootstrap tooling lives OUTSIDE the pinned checkout. $PIN predates these
-# scripts, so detaching to it removes them from $CLONE - including this file
-# while it is running. They are copied here first so the checker survives.
+# Bootstrap tooling lives OUTSIDE the pinned checkout. Detaching $CLONE to $PIN
+# replaces this pair with $PIN's own copy - an older pair, reviewed with an
+# older pin - including this file while it is running. They are copied here
+# first so that the pair reviewed with THIS pin is the one that survives.
 BOOTSTRAP_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/verification-ladder
 # sha256 of the check-install.sh this installer was reviewed with. The two are
 # reviewed as a pair and preserved as a pair, so requiring the checker merely to
@@ -29,7 +30,7 @@ BOOTSTRAP_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/verification-ladder
 # afterwards. Changing check-install.sh means changing this constant in the same
 # commit; a mismatch is refused rather than reported, because the checker is the
 # only thing that would have caught it.
-CHECKER_SHA=09f65bcc7f81c91fea7ea1694b0f5a0d524974e35b3df2b2d334ef01c8ae0f1b
+CHECKER_SHA=d7b922510547b8f9d856a897bd493a4a5db3785f2d2fd15fc259e542dcf6ce07
 SELF=$(readlink -f "$0" 2>/dev/null || echo "$0")
 SELF_DIR=$(dirname "$SELF")
 DO_CODEX=0; DRY=0; FORCE=0
@@ -176,11 +177,12 @@ done
 # ---- step 1b: preserve bootstrap tooling outside the pinned checkout ---
 step "1b. Preserving bootstrap tooling in $BOOTSTRAP_DIR"
 preserve_bootstrap() {
-  # Fail closed: $PIN does not contain check-install.sh, so if it is not beside
-  # the installer now it cannot be recovered later, and the closing message
-  # would name a checker that was never preserved.
+  # Fail closed: the only checker reviewed with this installer is the one beside
+  # it. $PIN's own copy is an older checker, reviewed with an older pin, so if
+  # this one is not here now it cannot be recovered later, and the closing
+  # message would name a checker that was never preserved.
   [ -f "$SELF_DIR/check-install.sh" ] \
-    || die "check-install.sh is not beside $SELF; refusing because $PIN does not contain it"
+    || die "check-install.sh is not beside $SELF; refusing because $PIN carries only an older checker"
   # Identity, not existence. Checked before the early return below, so a re-run
   # from $BOOTSTRAP_DIR re-establishes the pair rather than trusting what an
   # earlier run left there.
@@ -343,5 +345,5 @@ echo "Steps 1-5 done. Next:"
 [ "$DO_CODEX" -eq 1 ] && CODEX_ARG=" --codex" || CODEX_ARG=""
 echo "  $BOOTSTRAP_DIR/check-install.sh$CODEX_ARG"
 echo "then the discovery test, then the agent-level policy-less BLOCKED test."
-echo "(\$CLONE is pinned at $PIN, which predates these scripts, so they live"
-echo " in $BOOTSTRAP_DIR rather than inside the checkout.)"
+echo "(Run the pair in $BOOTSTRAP_DIR. \$CLONE is pinned at $PIN, and the"
+echo " scripts/ inside it are that revision's older pair, reviewed with an older pin.)"
