@@ -2514,6 +2514,12 @@ def command_run(args) -> int:
     # BLOCKED. Without this, `run --gate anything=true` emitted a PASS-shaped
     # record against an ungoverned repository.
     declared = policy(repo)
+    # Which contract this record is written under, decided before anything
+    # executes. It can refuse - a damaged activation record, an unrecognized
+    # `evidence` value, an activation the policy does not carry - and asked
+    # after the gates it refused only once the whole suite had run, discarding
+    # every result and writing nothing.
+    active = authority_active(repo, declared)
     gates = [tuple(spec.split("=", 1)) for spec in args.gate] if args.gate else local_gates(declared)
     for spec in gates:
         if len(spec) != 2 or not spec[0] or not spec[1]:
@@ -2548,7 +2554,7 @@ def command_run(args) -> int:
         # paths tell them it was their own test runner's cache, and that the fix
         # is .gitignore rather than the change under verification.
         record["drift_paths"] = sorted({path for _, path in before_paths ^ state_paths(repo, exclude)})
-    if authority_active(repo):
+    if active:
         v3_drift = bool(moved_dimensions)
         v3_verdict = verdict_of(results, v3_drift)
         after_state = {"target_state_after": after_target,
@@ -2698,6 +2704,9 @@ def command_import_ci(args) -> int:
     repo = require_repository(Path(args.repo).resolve())
     run, job = load_json(Path(args.run)), load_json(Path(args.job))
     declared = policy(repo)
+    # Before the payload is examined, as in `run`: a contract that refuses is
+    # the answer, whatever the payload says.
+    active = authority_active(repo, declared)
     sha = run.get("head_sha")
     if not sha:
         raise blocked(f"{args.run}: no head_sha; cannot bind CI evidence to a commit")
@@ -2768,7 +2777,7 @@ def command_import_ci(args) -> int:
               # meet the same payload v2 met.
               "steps": [{"name": step.get("name"), "conclusion": step.get("conclusion")}
                         for step in job.get("steps") or []]}
-    if authority_active(repo):
+    if active:
         direct = make_authoritative_v3(shadow_record(
             repo, declared, gates, "ci", {"repository": clean_repository_identity(sha)},
             recorded_at=record["recorded_at"], source=source), record["verdict"])

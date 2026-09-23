@@ -170,6 +170,48 @@ def test_a_policy_that_does_not_parse_is_not_read_as_silent(tmp_path):
     assert output.count("policy does not parse") == 1, "one refusal, stated once"
 
 
+GATE_LEAVES_A_MARK = LOCAL_ONLY.replace('unit = "true"', 'unit = "touch gate-ran"')
+
+
+@pytest.mark.parametrize(("policy_text", "authority_text", "because"), [
+    pytest.param(GATE_LEAVES_A_MARK.replace(V3, "evidence/typo"), None,
+                 "evidence must be", id="unrecognized-contract"),
+    pytest.param(GATE_LEAVES_A_MARK, "not json at all", "unreadable", id="damaged-activation"),
+    pytest.param(GATE_LEAVES_A_MARK.replace(f'evidence = "{V3}"\n', ""),
+                 json.dumps({"schema": AUTHORITY_SCHEMA, "authority": V3}),
+                 "does not adopt", id="activation-not-adopted"),
+])
+def test_run_refuses_a_contract_before_any_gate_executes(tmp_path, policy_text, authority_text, because):
+    """The contract is decided before the suite runs, not after it.
+
+    Each of these refuses. `run` used to ask only once every gate had finished,
+    so a mistyped `evidence` line cost a full test run whose results were then
+    discarded with no record written.
+    """
+    root = bare_repo(tmp_path, policy_text)
+    (root / ".verification").mkdir()
+    if authority_text is not None:
+        authority(root).write_text(authority_text)
+    record = root / ".verification" / "local.json"
+    code, output = cli(root, "run", "--output", str(record))
+    assert code == 2, output
+    assert because in output, output
+    assert not (root / "gate-ran").exists(), "a gate executed under a contract that was already refused"
+    assert not record.exists()
+
+
+def test_import_ci_refuses_a_contract_before_reading_the_payload(tmp_path):
+    """The same order for `import-ci`: the contract is the answer, whatever the payload says."""
+    root = bare_repo(tmp_path, LOCAL_ONLY.replace(V3, "evidence/typo"))
+    run_payload, job_payload = tmp_path / "run.json", tmp_path / "job.json"
+    run_payload.write_text(json.dumps({"head_sha": "0" * 40, "event": "push"}))
+    job_payload.write_text("{}")
+    code, output = cli(root, "import-ci", "--run", str(run_payload), "--job", str(job_payload))
+    assert code == 2, output
+    assert "evidence must be" in output, output
+    assert "run is for" not in output, "the payload was examined under a contract that refuses"
+
+
 # --------------------------------------------------------------------------
 # The contract is committed, so it survives the evidence directory.
 # --------------------------------------------------------------------------
