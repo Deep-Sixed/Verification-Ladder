@@ -466,6 +466,26 @@ def test_check_still_binds_a_record_to_the_runtime_it_names(tmp_path):
         "only the runtime moved"
 
 
+def test_composition_refuses_a_record_from_the_pre_hardening_contract(repo):
+    """Through `compose`: a record stamped `evidence-v3.1` does not compose here.
+
+    That is the contract the previously pinned verifier writes. Nothing else
+    about this record is wrong - it is this checkout's own run, re-stamped - so
+    the refusal can only come from the contract.
+    """
+    activate(repo)
+    local = repo / ".verification" / "v3.json"
+    assert cli(repo, "run", "--output", str(local))[0] == 0
+    record = json.loads(local.read_text())
+    record["verifier"]["compatibility"] = "evidence-v3.1"
+    local.write_text(json.dumps(record))
+
+    code, output = cli(repo, "compose", str(local))
+    assert code != 0, output
+    assert "produced under contract 'evidence-v3.1'" in output, output
+    assert "READY FOR HUMAN GATE     TRUE" not in output
+
+
 def test_check_refuses_a_shadow_record(repo):
     """A shadow record binds to nothing, so there is nothing to re-bind."""
     pre_activation_evidence(repo)

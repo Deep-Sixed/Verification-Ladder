@@ -48,6 +48,38 @@ def test_a_contract_this_verifier_does_not_apply_is_refused():
     assert "the rules in force" in reason
 
 
+def test_records_from_the_pre_hardening_contract_are_refused():
+    """evidence-v3.1 is the contract the pre-hardening verifier still stamps.
+
+    Its records have the same shape as these and were judged under weaker rules:
+    no drift rejection, no bound CI chain, an adoption that fell back to
+    evidence/2 on a parse failure. The contract was incremented so that they
+    stop composing here, not merely so that the number moved.
+    """
+    assert verify.COMPATIBILITY != "evidence-v3.1"
+    status, reason = verify.verifier_status([_record(compatibility="evidence-v3.1")])
+    assert status == verify.INADMISSIBLE
+    assert "'evidence-v3.1'" in reason and "the rules in force" in reason
+
+    status, reason = verify.verifier_status([_record(), _record(compatibility="evidence-v3.1")])
+    assert status == verify.INADMISSIBLE
+    assert "different verifier contracts" in reason
+
+
+def test_the_release_notes_name_the_contract_this_verifier_applies():
+    """A release that changes the contract says so in its notes (§J).
+
+    Held mechanically, like VERSION against pyproject: the newest CHANGELOG entry
+    must name this verifier's VERSION and COMPATIBILITY, so neither can move
+    without the notes moving with it.
+    """
+    changelog = (_P(__file__).resolve().parents[1] / "CHANGELOG.md").read_text()
+    newest = re.search(r"^## (\S+) \S+ contract `([^`]+)`", changelog, re.MULTILINE)
+    assert newest, "CHANGELOG.md has no '## <version> - contract `<contract>`' entry"
+    assert newest.group(1) == verify.VERSION
+    assert newest.group(2) == verify.COMPATIBILITY
+
+
 def test_a_record_without_a_contract_establishes_nothing():
     status, reason = verify.verifier_status([{"verifier": {"commit": "a" * 40}}])
     assert status == verify.INADMISSIBLE

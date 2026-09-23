@@ -60,8 +60,14 @@ EVIDENCE_CONTRACT = "evidence"
 # Provenance says which build produced a record; the contract says which records
 # may compose. They are separate: a verifier can keep the v3 record shape and
 # change what admissible means, and that must invalidate earlier evidence.
-COMPATIBILITY = "evidence-v3.1"
-VERSION = "0.2.0"  # tracks pyproject's version; tests/test_schema_v3.py holds them equal
+#
+# evidence-v3.2 (0.3.0): drifted and refused records are rejected at composition,
+# CI evidence binds repository -> run -> attempt -> workflow -> job -> commit
+# against policy-declared expectations, and the adopted contract is committed
+# and fails closed. evidence-v3.1 was the same record shape under weaker rules,
+# so its records must not compose with these. CHANGELOG.md says what moved.
+COMPATIBILITY = "evidence-v3.2"
+VERSION = "0.3.0"  # tracks pyproject's version; tests/test_schema_v3.py holds them equal
 # A gate declares the target dimensions it depends on. Evidence must carry every
 # dimension its gate declares, and dimensions it does not declare are never
 # compared - so a moved runtime expires a behavioural gate while a lint gate,
