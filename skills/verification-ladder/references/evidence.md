@@ -186,19 +186,66 @@ authority that can run it does. There is no field for waiving a gate, and that
 is deliberate - the only ways to clear one are to run it, to import a run that
 did, or to change the committed policy in a reviewed change.
 
-## Shadow mode
+## Which contract decides
 
-Everything above is `verification.ladder.evidence/2`, and it is what decides.
-Beside each record the CLI also writes an `evidence/3` shadow, built from the
-same execution rather than a second one, under
+Two are implemented, and the project chooses. `verification.ladder.evidence/2`
+is the default and is everything above. `verification.ladder.evidence/3` adds
+the target model, the definition governance and the provenance chain described
+in `docs/design/evidence-v3.md`.
+
+Adopting evidence/3 takes **two** things, and neither alone is enough.
+
+```toml
+# verification.toml - committed, reviewed, and therefore durable
+evidence = "verification.ladder.evidence/3"
+```
+
+```sh
+python "$VERIFY" qualify .verification/*.json   # did this evidence reach every predicate?
+python "$VERIFY" activate .verification/*.json  # writes .verification/authority.json
+```
+
+The policy records what the project adopted. The activation record records that
+the qualified path actually ran in **this checkout**, and is deliberately not
+committed - qualification is a property of a working copy, not of a commit. The
+two are checked against each other on every command:
+
+| policy | activation record | result |
+|---|---|---|
+| silent | absent | evidence/2, the default |
+| adopts evidence/3 | present and valid | evidence/3 decides |
+| adopts evidence/3 | absent | the migration window: records are produced and marked pre-activation, `compose` is BLOCKED |
+| silent | present | BLOCKED - that activation is lost on `rm -rf .verification` or a fresh clone |
+| either | present and damaged | BLOCKED - a parse failure must not select weaker semantics |
+
+The last two rows are the point. A contract that lives only in a git-ignored
+directory is a property of one working copy, and a declaration that fails to
+parse used to read exactly like a repository that had never activated.
+
+Before activation, the CLI writes an evidence/3 **shadow** beside each record,
+built from the same execution rather than a second one, under
 `.verification/shadow/<name>.v3.json`. Nothing reads it to decide anything, and
 `compose .verification/*.json` cannot reach it.
 
-A repository may describe how its executions read under evidence/3 in a
-`[shadow]` policy layer. That layer declares nothing authoritative: it cannot
-run a command, satisfy a required gate, or change a verdict or exit code, and a
-gate only it declares stays unpaired rather than becoming executable. Delete the
-section and no result changes.
+A repository describes how its executions read under evidence/3 in a `[shadow]`
+policy layer. Before activation that layer decides nothing: it cannot run a
+command, satisfy a required gate, or change a verdict or exit code, and a gate
+only it declares stays unpaired rather than becoming executable. After
+activation it is how gates are read.
+
+### What an activation covers
+
+`qualify` asks whether this evidence set reached every predicate evidence/3
+enforces. Some predicates a project cannot reach: a repository with no CI gate
+never exercises the provenance chain, and one with no behavioural gate never
+exercises the artifact chain. Those read `OUT OF SCOPE` rather than `UNCOVERED`
+— a fact about the policy, not a gap in the evidence — and they do not block
+activation.
+
+The activation record keeps both lists. Adding a CI gate to a project that
+activated without one is then reported at composition: that activation never
+exercised the provenance chain and cannot vouch for evidence that now needs it.
+Re-run `qualify` and `activate`.
 
 Three commands work on that layer, and none of them decides anything:
 
@@ -220,8 +267,25 @@ at all? A predicate nobody evaluated reads exactly like one that passed unless
 the report keeps them apart, so `qualify` has a fourth outcome, `UNCOVERED`.
 
 `--execution` on `attest` affects the shadow alone; the authoritative
-attestation is byte-identical with it and without it. A `baseline` is never a
-prerequisite: its absence reports `N/A` and changes nothing.
+attestation is byte-identical with it and without it.
+
+A `baseline` is never a prerequisite for `compare` or `qualify`: its absence
+reports `N/A` and changes nothing there. Under evidence/3 it **is** a
+prerequisite for `compose` and for `activate`, because the definitions that
+govern a task have to be captured before the task changes them. Take it first,
+keep `.verification/shadow/baseline.v3.json` with the evidence, and re-take it
+when the task legitimately changes what a gate means - the composite then reads
+`DEFINITION CHANGE PENDING` rather than a clean climb, which is the human gate
+doing its job.
+
+`check` re-binds one record to the checkout in front of you under either
+contract. For an evidence/3 record it re-binds every dimension the record binds
+to, and always the repository, so a record that still describes this worktree
+but names a runtime that has since been replaced reads STALE, and says which
+dimension moved - `repository.worktree_state` rather than `repository`, in the
+same vocabulary `run` uses for drift. A CI record binds the repository alone,
+since a clean checkout of one commit is all CI establishes, so a declared
+runtime cannot expire it.
 
 See `docs/design/evidence-v3.md` §M for what each stage must establish before
 the next, and §M4 for why the authority switch is its own review point.

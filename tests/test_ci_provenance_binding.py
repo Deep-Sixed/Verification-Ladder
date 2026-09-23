@@ -273,3 +273,40 @@ def test_widening_the_accepted_authority_is_a_definition_change(project):
     assert "DEFINITION CHANGE PENDING" in output, output
     assert "completion contract changed" in output
     assert code != 0 or "CLEAN CLIMB              FALSE" in output
+
+
+# --------------------------------------------------------------------------
+# `check` re-binds a CI record over what it binds, not over the whole target.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("project", [True], ids=["evidence3"], indirect=True)
+def test_check_rebinds_a_ci_record_over_the_dimensions_it_binds(project):
+    """A CI record says nothing about the runtime, so a runtime cannot make it stale.
+
+    `import-ci` binds the repository alone - CI establishes a clean checkout of
+    one commit - while `check` compared the record against the whole current
+    target. Wherever the policy declared a runtime, every CI record read STALE
+    with "runtime differs", on the very commit it describes.
+    """
+    (project / "runtime.json").write_text('{"build": "A"}\n')
+    with (project / "verification.toml").open("a") as policy:
+        policy.write('\n[shadow.runtime]\nfacts_file = "runtime.json"\n')
+    subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false",
+                    "commit", "-qm", "declare a runtime"], cwd=project, check=True)
+
+    code, output, target = import_ci(project)
+    assert code == 0, output
+    record = json.loads(target.read_text())
+    assert record["schema"] == SCHEMA_V3
+    assert set(record["target_state"]) == {"repository"}, "the premise: CI binds the repository alone"
+
+    code, output = cli(project, "check", str(target))
+    assert code == 0, output
+    assert "differs from this record" not in output
+
+    # Narrower is not looser: the repository still binds.
+    (project / "src.txt").write_text("moved\n")
+    code, output = cli(project, "check", str(target))
+    assert code == 2, output
+    assert "repository.worktree_state differs from this record" in output

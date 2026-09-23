@@ -53,6 +53,10 @@ COMPOSITE = "verification.ladder.composite/2"
 SCHEMA_V3 = "verification.ladder.evidence/3"
 BASELINE_SCHEMA = "verification.ladder.baseline/1"
 AUTHORITY_SCHEMA = "verification.ladder.authority/1"
+# The policy key naming the evidence contract this project has adopted. Committed,
+# unlike the activation record, so the contract survives evidence cleanup and a
+# fresh clone rather than being a property of one working copy.
+EVIDENCE_CONTRACT = "evidence"
 # Provenance says which build produced a record; the contract says which records
 # may compose. They are separate: a verifier can keep the v3 record shape and
 # change what admissible means, and that must invalidate earlier evidence.
@@ -120,6 +124,11 @@ V3_DECLARATION_KEYS = frozenset({"command", "step", "driver", "target", "evidenc
 # a declaration here executes nothing, satisfies nothing and blocks nothing.
 SHADOW_POLICY = "shadow"
 SHADOW_BLOCKS = ("local", "ci", "behavioral")
+# A predicate this consumer's declaration cannot put in play. Distinct from
+# UNCOVERED, which means the evidence set failed to exercise something it could
+# have: out of scope is a fact about the policy, and it is recorded in the
+# activation so composition can refuse evidence that later needs it.
+OUT_OF_SCOPE = "OUT OF SCOPE"
 # Where a repository declares what "verified" means for it. The first file that
 # carries a policy wins; pyproject.toml lets a Python project keep one config file.
 POLICY_FILES = (("verification.toml", ()), ("pyproject.toml", ("tool", "verification")))
@@ -274,6 +283,21 @@ def policy(repo: Path) -> dict:
     project. A repository that has declared nothing is BLOCKED: silence is not
     consent, and an unconfigured project must not read as a verified one.
     """
+    declared = declared_policy(repo)
+    if declared is None:
+        raise blocked(f"{repo}: {ONBOARDING}")
+    return declared
+
+
+def declared_policy(repo: Path) -> dict | None:
+    """The committed policy, or None when this repository declares none.
+
+    For a caller that has a meaning for "no policy" other than BLOCKED. `blocked`
+    prints as it builds the exit, so catching the SystemExit from `policy` does
+    not take the refusal back: it has already reached the reader, for a command
+    that then goes on to succeed. A policy that exists and does not parse is
+    still refused here - broken is not absent.
+    """
     for name, path in POLICY_FILES:
         config = repo / name
         try:
@@ -291,7 +315,7 @@ def policy(repo: Path) -> dict:
         if isinstance(declared, dict) and declared:
             refuse_inactive_v3(declared, config)
             return declared
-    raise blocked(f"{repo}: {ONBOARDING}")
+    return None
 
 
 def refuse_inactive_v3(declared: dict, config: Path) -> None:
@@ -1712,9 +1736,10 @@ def activation_findings(repo: Path, declared: dict, paths: list[Path],
                         records: list[dict]) -> tuple[list[str], list[dict], list[dict]]:
     rows, unpaired, shadows = activation_rows(repo, declared, paths, records)
     summary = qualification(rows)
+    scoped(repo, declared, summary)
     findings = [f"{path.name}: {reason}" for path, reason in unpaired]
     for entry in summary:
-        if entry["state"] != QUALIFIED:
+        if entry["state"] not in (QUALIFIED, OUT_OF_SCOPE):
             findings.append(f"{entry['predicate']}: {entry['state']}")
 
     declared_view = shadow_declaration(declared)
@@ -1733,6 +1758,59 @@ def activation_findings(repo: Path, declared: dict, paths: list[Path],
         if row["predicate"].startswith("governance") and row["v3_derived"] == DEFINITION_PENDING:
             findings.append("DEFINITION CHANGE PENDING")
     return findings, summary, shadows
+
+
+def capability_scope(repo: Path, declared: dict) -> dict[str, str]:
+    """M4 predicates this consumer's own declaration cannot put in play.
+
+    Qualification was verifier-wide: every predicate the verifier is capable of
+    enforcing had to be exercised before activation, the CI provenance chain and
+    the behavioural artifact chain among them. A project with no CI gate and no
+    behavioural gate cannot exercise those and never will, so it could not adopt
+    evidence/3 at all - not because its evidence was weak, but because the bar
+    was written for a different consumer.
+
+    Out of scope is not qualified. It is recorded in the activation declaration,
+    and composition refuses evidence that needs a predicate this activation never
+    covered, so narrowing the bar cannot quietly widen what the activation means.
+    """
+    view = shadow_declaration(declared)
+    definitions = gate_definitions(repo, view)
+    ci = bool(gate_map(declared, "ci_steps")) or any(
+        "ci" in definition.get("permitted_authorities", []) for definition in definitions.values())
+    # The same switch `compare_gate` uses to decide whether the artifact chain
+    # applies at all, and nothing else. Keying it off a declared `artifacts`
+    # list got both directions wrong: an ordinary execution gate that happens to
+    # name a report file put the chain in play, `compare_gate` then answered N/A
+    # for it, and activation was refused on a predicate this policy can never
+    # exercise; while a behavioural gate that declared no artifacts had the chain
+    # waved away as out of scope, when a missing artifact is exactly what the
+    # chain exists to refuse.
+    behavioural = any(definition.get("evidence_mode") == "execution+attestation"
+                      for definition in definitions.values())
+    scope = {}
+    if not ci:
+        for predicate in ("ci provenance", "ci step"):
+            scope[predicate] = "this policy declares no gate that CI establishes"
+    if not behavioural:
+        scope["artifact chain"] = ('this policy declares no behavioural gate '
+                                   '(evidence_mode = "execution+attestation")')
+    return scope
+
+
+def scoped(repo: Path, declared: dict, summary: list[dict]) -> list[dict]:
+    """Re-read UNCOVERED as OUT OF SCOPE where this policy cannot reach a predicate.
+
+    Only UNCOVERED is re-read. A disagreement or an incomparable row means the
+    predicate WAS exercised and did not hold, and no amount of "this project
+    does not use CI" makes that acceptable.
+    """
+    out_of_scope = capability_scope(repo, declared)
+    for entry in summary:
+        if entry["predicate"] in out_of_scope and entry["state"] == UNCOVERED:
+            entry["state"] = OUT_OF_SCOPE
+            entry["detail"] = out_of_scope[entry["predicate"]]
+    return summary
 
 
 def command_activate(args) -> int:
@@ -1754,6 +1832,15 @@ def command_activate(args) -> int:
         except SystemExit:
             findings.insert(0, "GOVERNING BASELINE MISSING: baseline record is unreadable")
 
+    # Adoption is committed; activation is not. Writing a declaration the policy
+    # does not carry produces exactly the state `authority_active` refuses, and
+    # the operator would find out on the next command rather than here.
+    if declared_contract(declared) != SCHEMA_V3:
+        findings.insert(0, (f"the policy does not adopt {SCHEMA_V3}: add "
+                            f"`{EVIDENCE_CONTRACT} = \"{SCHEMA_V3}\"` to verification.toml as a "
+                            f"reviewed change first, so the contract survives evidence cleanup and "
+                            f"a fresh clone"))
+
     print("M4 ACTIVATION (evidence/3 authority precondition)\n")
     for entry in summary:
         print(f"  {entry['state']:<15} {entry['predicate']}")
@@ -1773,6 +1860,13 @@ def command_activate(args) -> int:
         "baseline": baseline.relative_to(repo).as_posix() if baseline.is_relative_to(repo) else str(baseline),
         "records": [path.relative_to(repo).as_posix() if path.is_relative_to(repo) else str(path)
                     for path in paths],
+        # What this activation actually covers. A local-only project qualifies a
+        # narrower set than a CI-backed one, and the difference has to travel
+        # with the declaration: adding a CI gate afterwards must not be covered
+        # by an activation that never exercised the provenance chain.
+        "qualified": sorted(entry["predicate"] for entry in summary if entry["state"] == QUALIFIED),
+        "out_of_scope": {entry["predicate"]: entry["detail"] for entry in summary
+                         if entry["state"] == OUT_OF_SCOPE},
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")
@@ -1869,6 +1963,22 @@ def command_compose_v3(args) -> int:
         if (record.get("target_state") or {}).get("repository", {}).get("worktree_state") == composed_state)
 
     findings = []
+    # What this activation covered, against what the policy needs now. Narrowing
+    # the bar for a local-only consumer is only safe while the consumer stays
+    # local-only: adding a CI gate afterwards needs a predicate the activation
+    # never exercised, and the activation cannot retroactively vouch for it.
+    activation = authority_record(repo)
+    if activation is not None and "qualified" in activation:
+        covered = set(activation["qualified"]) | set(activation.get("out_of_scope") or {})
+        needed = {name for name, _ in M4_CONTRACT} - set(capability_scope(repo, policy_declared))
+        for predicate in sorted(needed - set(activation["qualified"])):
+            findings.append(
+                f"{predicate}: this policy now needs it, and the activation at "
+                f"{authority_path(repo).name} did not qualify it"
+                + (f" ({(activation.get('out_of_scope') or {}).get(predicate)})"
+                   if predicate in covered else "")
+                + ". Re-run `verify.py qualify` and `verify.py activate`."
+            )
     # Before any per-gate reading. A record whose own verdict refused it cannot
     # be rehabilitated by the rows inside it: a drifted run has passing gates by
     # construction - they are what moved the tree - and reading only the rows
@@ -2071,6 +2181,7 @@ def command_qualify(args) -> int:
             print(f"  unpaired {path.name:<24} {record.get('authority', 'local'):<6} "
                   f"{comparison['reason']}")
     summary = qualification(rows)
+    scoped(repo, declared, summary)
     print()
     for entry in summary:
         counts = entry["counts"]
@@ -2078,15 +2189,18 @@ def command_qualify(args) -> int:
         print(f"  {entry['state']:<15} {entry['predicate']:<28} {tally}")
         if entry["state"] in (DISAGREEMENT, NOT_COMPARABLE):
             print(f"                    {entry['gate']}: {entry['detail']}")
+        elif entry["state"] == OUT_OF_SCOPE:
+            print(f"                    {entry['detail']}, so this consumer never puts it in play")
         elif entry["state"] == UNCOVERED:
             print(f"                    nothing in this evidence set exercised it - {entry['enforces']}")
 
     tally = {state: sum(1 for e in summary if e["state"] == state)
-             for state in (QUALIFIED, DISAGREEMENT, NOT_COMPARABLE, UNCOVERED)}
-    qualified = tally[QUALIFIED] == len(summary) and not unpaired
+             for state in (QUALIFIED, DISAGREEMENT, NOT_COMPARABLE, UNCOVERED, OUT_OF_SCOPE)}
+    qualified = tally[QUALIFIED] + tally[OUT_OF_SCOPE] == len(summary) and not unpaired
     print("\n  " + "-" * 62)
     print(f"  QUALIFIED {tally[QUALIFIED]}  DISAGREEMENT {tally[DISAGREEMENT]}"
-          f"  NOT COMPARABLE {tally[NOT_COMPARABLE]}  UNCOVERED {tally[UNCOVERED]}")
+          f"  NOT COMPARABLE {tally[NOT_COMPARABLE]}  UNCOVERED {tally[UNCOVERED]}"
+          f"  OUT OF SCOPE {tally[OUT_OF_SCOPE]}")
     print("  " + "-" * 62)
     print(f"  M3 QUALIFIED             {str(qualified).upper()}")
     print("  §M4 may take authority only over semantics qualified above. This says")
@@ -2175,15 +2289,134 @@ def authority_path(repo: Path) -> Path:
     return repo / EVIDENCE_DIR / "authority.json"
 
 
-def authority_active(repo: Path) -> bool:
+def declared_contract(declared: dict) -> str | None:
+    """Which evidence contract this project has ADOPTED, from its committed policy.
+
+    The activation record lives under `.verification/`, which is git-ignored by
+    construction, so it does not survive `rm -rf .verification` or a fresh clone.
+    Read alone it makes the contract a property of one working copy: delete the
+    directory and the next command reads the same repository under weaker
+    semantics, with nothing to say so. The adopted contract therefore belongs in
+    the policy, where it is committed and reviewed like any other completion
+    semantic.
+    """
+    value = declared.get(EVIDENCE_CONTRACT)
+    if value is None:
+        return None
+    if value not in (SCHEMA, SCHEMA_V3):
+        raise blocked(
+            f"{EVIDENCE_CONTRACT} must be {SCHEMA!r} or {SCHEMA_V3!r}, got {value!r}. "
+            f"An unrecognized contract is refused rather than read as the older one."
+        )
+    return value
+
+
+def authority_record(repo: Path) -> dict | None:
+    """This checkout's activation declaration, or None when it has none.
+
+    Unreadable is not absent. Returning False for a damaged declaration made it
+    indistinguishable from a repository that never activated, so the next command
+    fell back to evidence/2 without an explicit error - weaker semantics selected
+    by a parse failure, which is the one way semantics must never be chosen.
+    """
     path = authority_path(repo)
     if not path.exists():
-        return False
+        return None
     try:
         record = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return False
-    return record.get("schema") == AUTHORITY_SCHEMA and record.get("authority") == SCHEMA_V3
+    except (OSError, json.JSONDecodeError) as error:
+        raise blocked(
+            f"{path}: the activation declaration is unreadable ({type(error).__name__}: {error}). "
+            f"Refusing rather than falling back to {SCHEMA}. Restore the file, or delete it and "
+            f"re-run `verify.py activate` over evidence that qualifies."
+        ) from None
+    # Valid JSON is not the same as a declaration. `[1]`, `"x"` and `5` all
+    # parse, and reading `.get` off them raised AttributeError - a traceback
+    # where this function promises a refusal that names the file.
+    if not isinstance(record, dict):
+        raise blocked(f"{path}: not a {AUTHORITY_SCHEMA} declaration: it holds a JSON "
+                      f"{type(record).__name__}, not a table. Restore the file, or delete it and "
+                      f"re-run `verify.py activate`.")
+    if record.get("schema") != AUTHORITY_SCHEMA:
+        raise blocked(f"{path}: not a {AUTHORITY_SCHEMA} declaration (schema "
+                      f"{record.get('schema')!r})")
+    if record.get("authority") != SCHEMA_V3:
+        raise blocked(f"{path}: declares authority {record.get('authority')!r}, which this release "
+                      f"does not implement. Refusing rather than reading it as {SCHEMA}.")
+    # The two coverage lists composition reads. Checked here, once, so that a
+    # damaged list is refused as a damaged declaration rather than surfacing as
+    # a TypeError from whichever command happens to iterate it first.
+    qualified = record.get("qualified")
+    if "qualified" in record and not (
+            isinstance(qualified, list) and all(isinstance(name, str) for name in qualified)):
+        raise blocked(f"{path}: `qualified` must be a list of predicate names, got {qualified!r}. "
+                      f"Re-run `verify.py qualify` and `verify.py activate`.")
+    out_of_scope = record.get("out_of_scope")
+    if "out_of_scope" in record and not (
+            isinstance(out_of_scope, dict)
+            and all(isinstance(key, str) and isinstance(value, str) for key, value in out_of_scope.items())):
+        raise blocked(f"{path}: `out_of_scope` must map predicate names to reasons, got {out_of_scope!r}. "
+                      f"Re-run `verify.py qualify` and `verify.py activate`.")
+    return record
+
+
+def authority_state(repo: Path, declared: dict | None = None) -> tuple[str | None, dict | None]:
+    """What this repository adopted, and what this checkout actually activated.
+
+    Two sources, saying different things. The POLICY records the contract this
+    project adopted, and is committed. The ACTIVATION RECORD records that the
+    qualified path ran in THIS checkout, and is deliberately not committed:
+    qualification is a property of a working copy, not of a commit.
+
+    Adopted-but-not-activated is the migration window and is legitimate - it is
+    where pre-activation evidence is produced. Activated-but-not-adopted is not:
+    that activation disappears with `rm -rf .verification` or on a fresh clone,
+    and the repository then verifies under the older contract with nothing to say
+    so. It is refused wherever it is found.
+    """
+    record = authority_record(repo)
+    if declared is None:
+        # A repository with no policy has adopted no contract. Saying so here is
+        # not the same as tolerating it: every command that needs a policy reads
+        # one itself and is BLOCKED without it. What must still be caught is an
+        # activation record sitting in a repository whose policy cannot back it,
+        # which is the refusal below.
+        #
+        # Not `policy()` under `except SystemExit`. That printed the onboarding
+        # refusal before the handler ran, so `attest` in an unconfigured
+        # repository reported BLOCKED twice and then exited 0; and a policy that
+        # failed to parse was read as `{}`, which then blamed the activation
+        # record for a policy "that does not adopt it".
+        declared = declared_policy(repo) or {}
+    contract = declared_contract(declared)
+    if contract != SCHEMA_V3 and record is not None:
+        raise blocked(
+            f"{authority_path(repo)} activates {SCHEMA_V3}, but the policy does not adopt it "
+            f"({EVIDENCE_CONTRACT} is {contract!r}). An activation the policy does not carry is lost "
+            f"on `rm -rf {EVIDENCE_DIR}` or a fresh clone, and the repository then verifies under "
+            f"{SCHEMA} with nothing to say so. Add `{EVIDENCE_CONTRACT} = \"{SCHEMA_V3}\"` to the "
+            f"policy as a reviewed change, or remove the activation record."
+        )
+    return contract, record
+
+
+def authority_active(repo: Path, declared: dict | None = None) -> bool:
+    """Whether evidence/3 is authoritative for the records written here."""
+    return authority_state(repo, declared)[1] is not None
+
+
+def migration_notice(repo: Path, declared: dict | None = None, *, file) -> None:
+    """Say that a record is pre-activation, on a repository that has adopted v3.
+
+    Producing evidence/2 here is correct - `qualify` and `activate` read exactly
+    these records - but a reader who does not know that would take the record for
+    an ordinary authoritative one under a contract this project has left behind.
+    """
+    contract, record = authority_state(repo, declared)
+    if contract == SCHEMA_V3 and record is None:
+        print(f"  note     pre-activation record: this policy adopts {SCHEMA_V3} and this checkout "
+              f"is not activated.\n           `qualify` and `activate` read records like this one; "
+              f"`compose` will refuse until then.", file=file)
 
 
 def load_v3_record(path: Path, *, shadow: bool | None = None) -> dict:
@@ -2291,6 +2524,12 @@ def command_run(args) -> int:
     # BLOCKED. Without this, `run --gate anything=true` emitted a PASS-shaped
     # record against an ungoverned repository.
     declared = policy(repo)
+    # Which contract this record is written under, decided before anything
+    # executes. It can refuse - a damaged activation record, an unrecognized
+    # `evidence` value, an activation the policy does not carry - and asked
+    # after the gates it refused only once the whole suite had run, discarding
+    # every result and writing nothing.
+    active = authority_active(repo, declared)
     gates = [tuple(spec.split("=", 1)) for spec in args.gate] if args.gate else local_gates(declared)
     for spec in gates:
         if len(spec) != 2 or not spec[0] or not spec[1]:
@@ -2325,7 +2564,7 @@ def command_run(args) -> int:
         # paths tell them it was their own test runner's cache, and that the fix
         # is .gitignore rather than the change under verification.
         record["drift_paths"] = sorted({path for _, path in before_paths ^ state_paths(repo, exclude)})
-    if authority_active(repo):
+    if active:
         v3_drift = bool(moved_dimensions)
         v3_verdict = verdict_of(results, v3_drift)
         after_state = {"target_state_after": after_target,
@@ -2341,6 +2580,7 @@ def command_run(args) -> int:
 
     emit(record, output)
     summarize(record, output, file=sys.stderr)
+    migration_notice(repo, declared, file=sys.stderr)
     # After the authoritative record is written and its verdict is fixed. The
     # shadow record describes the same `results`, so no gate runs twice, and
     # nothing below can change what was just reported.
@@ -2403,6 +2643,7 @@ def command_attest(args) -> int:
 
     emit(record, output)
     print(f"attested {args.rung} for {current}", file=sys.stderr)
+    migration_notice(repo, file=sys.stderr)
     # The authoritative record is written and unchanged by everything below.
     # Nothing is re-run to manufacture the evidence/3 view: it is derived from
     # the attestation just recorded, plus the binding the caller named.
@@ -2471,8 +2712,12 @@ def command_import_ci(args) -> int:
     up to date with its base, and quietly false the moment it is not.
     """
     repo = require_repository(Path(args.repo).resolve())
-    run, job = load_json(Path(args.run)), load_json(Path(args.job))
     declared = policy(repo)
+    # Before the payload is read at all, as in `run`: a contract that refuses is
+    # the answer, whatever the payload says - including that it does not parse.
+    # Resolving it after `load_json` let a malformed payload answer first.
+    active = authority_active(repo, declared)
+    run, job = load_json(Path(args.run)), load_json(Path(args.job))
     sha = run.get("head_sha")
     if not sha:
         raise blocked(f"{args.run}: no head_sha; cannot bind CI evidence to a commit")
@@ -2543,7 +2788,7 @@ def command_import_ci(args) -> int:
               # meet the same payload v2 met.
               "steps": [{"name": step.get("name"), "conclusion": step.get("conclusion")}
                         for step in job.get("steps") or []]}
-    if authority_active(repo):
+    if active:
         direct = make_authoritative_v3(shadow_record(
             repo, declared, gates, "ci", {"repository": clean_repository_identity(sha)},
             recorded_at=record["recorded_at"], source=source), record["verdict"])
@@ -2553,6 +2798,7 @@ def command_import_ci(args) -> int:
 
     emit(record, output)
     summarize(record, output, file=sys.stderr)
+    migration_notice(repo, declared, file=sys.stderr)
     emit_shadow(repo, output, lambda: shadow_record(
         repo, declared, gates, "ci",
         {"repository": clean_repository_identity(sha)},
@@ -2612,8 +2858,19 @@ def completion_findings(rows: dict[str, dict], declared: dict) -> list[str]:
 
 def command_compose(args) -> int:
     repo = require_repository(Path(args.repo).resolve())
-    if authority_active(repo):
+    contract, activation = authority_state(repo)
+    if activation is not None:
         return command_compose_v3(args)
+    if contract == SCHEMA_V3:
+        # The migration window is for producing evidence, not for reporting
+        # completion. A composite under the older contract, for a project that
+        # has adopted the newer one, is the claim this whole package exists to
+        # stop being available by accident.
+        raise blocked(
+            f"this policy adopts {SCHEMA_V3}, but this checkout carries no activation record at "
+            f"{authority_path(repo)}, so completion cannot be reported under {SCHEMA}. "
+            f"Run `verify.py qualify` over the pre-activation records, then `verify.py activate`."
+        )
     paths = [Path(p).resolve() for p in args.paths]
     output = Path(args.output).resolve() if args.output else None
     exclude = relative_inside(repo, [*paths, output])
@@ -2663,10 +2920,49 @@ def command_compose(args) -> int:
 
 
 def command_check(args) -> int:
+    """Re-bind one record to the checkout in front of you, under either contract.
+
+    `check` read evidence/2 only, so on a repository that had activated
+    evidence/3 the one command for "does this record still describe this tree"
+    refused every record the other commands were writing. Both are read now, and
+    a v3 record is re-bound over every dimension it binds, and always the
+    repository, rather than the worktree digest alone: a record naming a runtime
+    binds to that runtime too, and a CI record, which binds the repository
+    alone, is not expired by a runtime it never described.
+    """
     path = Path(args.path).resolve()
     repo = require_repository(Path(args.repo).resolve())
-    record = load_record(path)
+    record = load_json(path)
     exclude = relative_inside(repo, [path])
+    if record.get("schema") == SCHEMA_V3:
+        if record.get("shadow"):
+            raise blocked(f"{path}: shadow evidence/3 is diagnostic only and binds to nothing to check")
+        bound = record.get("target_state") or {}
+        # Over the dimensions the record binds to, and never fewer than the
+        # repository. CI establishes a clean checkout of one commit and nothing
+        # about the runtime, so its records bind the repository alone; comparing
+        # them against the whole current target read every CI record STALE -
+        # "runtime differs" - on the exact commit it describes, wherever the
+        # policy declares a runtime. `compose` already projects per gate for the
+        # same reason. A dimension the record DOES bind and that cannot be read
+        # now is still reported, by `target_drift`, as moved.
+        current = {dimension: value
+                   for dimension, value in v3_current_target(repo, policy(repo), exclude).items()
+                   if dimension in bound or dimension == "repository"}
+        # `target_drift`, the same comparison `run` uses to decide whether a gate
+        # moved the target underneath itself. This was a local set comprehension
+        # while that helper lived on an unlanded branch; two readings of "which
+        # dimensions differ" is one more than a verifier should have, and the
+        # helper is the finer of the two - it names `repository.worktree_state`
+        # rather than `repository`, so the reader learns which part moved.
+        # `bound` empty means the record binds to nothing at all, which is not a
+        # comparison this can make: it stays STALE, named for what is missing.
+        moved = target_drift(bound, current) if bound else ["target_state"]
+        verdict = STALE if moved else record.get("verdict", BLOCKED)
+        summarize_v3_record(record | {"verdict": verdict}, path, file=sys.stdout, moved=moved)
+        return EXIT[verdict]
+    if record.get("schema") != SCHEMA:
+        raise blocked(f"{path}: not a {SCHEMA} or {SCHEMA_V3} record")
     current = state_id(repo, exclude)
     stale = current != record["repository"]["state_id"]
     verdict = STALE if stale else record["verdict"]
@@ -2698,11 +2994,13 @@ def summarize(record: dict, path: Path | None, *, file, current_state: str | Non
         print(f"  evidence {path}", file=file)
 
 
-def summarize_v3_record(record: dict, path: Path | None, *, file) -> None:
+def summarize_v3_record(record: dict, path: Path | None, *, file, moved: list[str] | None = None) -> None:
     repository = (record.get("target_state") or {}).get("repository") or {}
     print(f"{record.get('verdict', PASS)}  {repository.get('head', '')[:12]}  "
           f"[{record.get('authority', 'local')}, evidence/3]", file=file)
     print(f"  state    {repository.get('worktree_state')}", file=file)
+    for dimension in moved or []:
+        print(f"  current  {dimension} differs from this record; re-verify", file=file)
     for gate in record.get("gates") or []:
         detail = gate.get("reason") or gate.get("note") or (
             f"exit {gate['exit_code']}" if "exit_code" in gate else gate.get("step", gate["kind"]))
