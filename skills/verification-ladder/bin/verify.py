@@ -2915,8 +2915,18 @@ def command_check(args) -> int:
     if record.get("schema") == SCHEMA_V3:
         if record.get("shadow"):
             raise blocked(f"{path}: shadow evidence/3 is diagnostic only and binds to nothing to check")
-        current = v3_current_target(repo, policy(repo), exclude)
         bound = record.get("target_state") or {}
+        # Over the dimensions the record binds to, and never fewer than the
+        # repository. CI establishes a clean checkout of one commit and nothing
+        # about the runtime, so its records bind the repository alone; comparing
+        # them against the whole current target read every CI record STALE -
+        # "runtime differs" - on the exact commit it describes, wherever the
+        # policy declares a runtime. `compose` already projects per gate for the
+        # same reason. A dimension the record DOES bind and that cannot be read
+        # now is still reported, by `target_drift`, as moved.
+        current = {dimension: value
+                   for dimension, value in v3_current_target(repo, policy(repo), exclude).items()
+                   if dimension in bound or dimension == "repository"}
         # `target_drift`, the same comparison `run` uses to decide whether a gate
         # moved the target underneath itself. This was a local set comprehension
         # while that helper lived on an unlanded branch; two readings of "which

@@ -322,6 +322,32 @@ def test_check_names_drift_the_way_the_rest_of_the_verifier_does(repo):
     assert "moved  repository.worktree_state" in ran
 
 
+def test_check_still_binds_a_record_to_the_runtime_it_names(tmp_path):
+    """The other side of re-binding over what a record binds: nothing looser.
+
+    `check` compares only the dimensions a record carries, so a CI record, which
+    binds the repository alone, is not expired by a runtime it never described.
+    A local record that DOES name a runtime binds to it. The facts file sits in
+    the git-ignored evidence directory here, so replacing it moves the runtime
+    and nothing else - the one change the worktree digest cannot see.
+    """
+    root = bare_repo(tmp_path, LOCAL_ONLY + '\n[shadow.runtime]\nfacts_file = ".verification/runtime.json"\n')
+    (root / ".verification").mkdir()
+    (root / ".verification" / "runtime.json").write_text('{"build": "A"}\n')
+    activate(root)
+    local = root / ".verification" / "v3.json"
+    assert cli(root, "run", "--output", str(local))[0] == 0
+    assert "runtime" in json.loads(local.read_text())["target_state"]
+    assert cli(root, "check", str(local))[0] == 0
+
+    (root / ".verification" / "runtime.json").write_text('{"build": "B"}\n')
+    code, output = cli(root, "check", str(local))
+    assert code == 2, output
+    assert "runtime differs from this record" in output
+    assert not [line for line in output.splitlines() if "repository" in line and "differs" in line], \
+        "only the runtime moved"
+
+
 def test_check_refuses_a_shadow_record(repo):
     """A shadow record binds to nothing, so there is nothing to re-bind."""
     pre_activation_evidence(repo)
