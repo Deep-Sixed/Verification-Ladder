@@ -2925,8 +2925,10 @@ def command_check(args) -> int:
     `check` read evidence/2 only, so on a repository that had activated
     evidence/3 the one command for "does this record still describe this tree"
     refused every record the other commands were writing. Both are read now, and
-    a v3 record is re-bound over its whole declared target rather than the
-    worktree digest alone: a record naming a runtime binds to that runtime too.
+    a v3 record is re-bound over every dimension it binds, and always the
+    repository, rather than the worktree digest alone: a record naming a runtime
+    binds to that runtime too, and a CI record, which binds the repository
+    alone, is not expired by a runtime it never described.
     """
     path = Path(args.path).resolve()
     repo = require_repository(Path(args.repo).resolve())
