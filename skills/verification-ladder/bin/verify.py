@@ -1778,13 +1778,23 @@ def capability_scope(repo: Path, declared: dict) -> dict[str, str]:
     definitions = gate_definitions(repo, view)
     ci = bool(gate_map(declared, "ci_steps")) or any(
         "ci" in definition.get("permitted_authorities", []) for definition in definitions.values())
-    behavioural = any(definition.get("artifacts") for definition in definitions.values())
+    # The same switch `compare_gate` uses to decide whether the artifact chain
+    # applies at all, and nothing else. Keying it off a declared `artifacts`
+    # list got both directions wrong: an ordinary execution gate that happens to
+    # name a report file put the chain in play, `compare_gate` then answered N/A
+    # for it, and activation was refused on a predicate this policy can never
+    # exercise; while a behavioural gate that declared no artifacts had the chain
+    # waved away as out of scope, when a missing artifact is exactly what the
+    # chain exists to refuse.
+    behavioural = any(definition.get("evidence_mode") == "execution+attestation"
+                      for definition in definitions.values())
     scope = {}
     if not ci:
         for predicate in ("ci provenance", "ci step"):
             scope[predicate] = "this policy declares no gate that CI establishes"
     if not behavioural:
-        scope["artifact chain"] = "this policy declares no gate producing artifacts"
+        scope["artifact chain"] = ('this policy declares no behavioural gate '
+                                   '(evidence_mode = "execution+attestation")')
     return scope
 
 

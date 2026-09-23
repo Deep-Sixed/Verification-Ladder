@@ -271,7 +271,7 @@ def test_a_local_only_project_qualifies(repo):
     for predicate in ("artifact chain", "ci provenance", "ci step"):
         assert f"OUT OF SCOPE    {predicate}" in output, output
     assert "declares no gate that CI establishes" in output
-    assert "declares no gate producing artifacts" in output
+    assert "declares no behavioural gate" in output
 
 
 def test_activation_records_what_it_actually_covered(repo):
@@ -282,6 +282,60 @@ def test_activation_records_what_it_actually_covered(repo):
     assert "outcome" in record["qualified"] and "governance" in record["qualified"]
     assert set(record["out_of_scope"]) == {"artifact chain", "ci provenance", "ci step"}
     assert not set(record["qualified"]) & set(record["out_of_scope"])
+
+
+def shadow_gate(mode, artifacts=None):
+    """`unit`, re-read under evidence/3 with the given mode and artifact declaration."""
+    body = f'\n[shadow.gates.local.unit]\ncommand = "true"\nevidence_mode = "{mode}"\n'
+    return LOCAL_ONLY + body + (f"artifacts = {artifacts}\n" if artifacts is not None else "")
+
+
+def test_an_execution_gate_that_names_artifacts_does_not_put_the_chain_in_play(tmp_path):
+    """The chain applies to behavioural gates. Naming a report file does not make one.
+
+    Scope was decided by whether any gate declared `artifacts`, while
+    `compare_gate` applies the chain only to `execution+attestation` gates. An
+    execution gate naming a file put the chain in scope, the comparison then
+    answered N/A for it, the predicate read UNCOVERED, and activation was
+    refused on something this policy can never exercise.
+    """
+    root = bare_repo(tmp_path, shadow_gate("execution", '["build/report.txt"]'))
+    local, attestations = pre_activation_evidence(root)
+    code, output = cli(root, "qualify", str(local), str(attestations))
+    assert code == 0, output
+    assert "OUT OF SCOPE    artifact chain" in output, output
+    assert "declares no behavioural gate" in output
+    assert "M3 QUALIFIED             TRUE" in output
+
+    code, output = cli(root, "activate", str(local), str(attestations))
+    assert code == 0, output
+    assert "artifact chain" in json.loads(authority(root).read_text())["out_of_scope"]
+
+
+@pytest.mark.parametrize("artifacts", [
+    pytest.param(None, id="no-artifacts-declared"),
+    pytest.param("[]", id="an-empty-list"),
+    pytest.param('["build/never-written.json"]', id="an-artifact-never-produced"),
+])
+def test_a_behavioural_gate_keeps_the_artifact_chain_in_scope(repo, artifacts):
+    """The other direction: a behavioural gate is never waved away for lacking artifacts.
+
+    A missing or empty artifact declaration is exactly what the chain exists to
+    refuse, so it cannot also be what takes the chain out of scope. Here a
+    local-only activation - which recorded the chain OUT OF SCOPE - meets a
+    policy that has since made `unit` behavioural. Keyed on `artifacts`, the
+    first two cases still read the chain as out of scope, and composition
+    accepted an activation that never exercised it.
+    """
+    activate(repo)
+    assert "artifact chain" in json.loads(authority(repo).read_text())["out_of_scope"]
+    local, _ = pre_activation_evidence(repo)
+
+    (repo / "verification.toml").write_text(shadow_gate("execution+attestation", artifacts))
+    code, output = cli(repo, "compose", str(local))
+    assert code != 0, output
+    assert "artifact chain: this policy now needs it" in output, output
+    assert "READY FOR HUMAN GATE     TRUE" not in output
 
 
 def test_adding_a_ci_gate_is_not_covered_by_a_local_only_activation(repo):
