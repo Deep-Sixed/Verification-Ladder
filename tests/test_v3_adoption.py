@@ -93,6 +93,19 @@ def activate(repo):
                  f"not a {AUTHORITY_SCHEMA}", id="wrong-schema"),
     pytest.param(lambda text: json.dumps({"schema": AUTHORITY_SCHEMA, "authority": "evidence/9"}),
                  "does not implement", id="unknown-authority"),
+    # Valid JSON that is not a table. Each of these parsed, and reading `.get`
+    # off it raised AttributeError: a traceback, not the refusal promised above.
+    pytest.param(lambda text: "[1]", "holds a JSON list", id="a-list"),
+    pytest.param(lambda text: '"activated"', "holds a JSON str", id="a-string"),
+    pytest.param(lambda text: "5", "holds a JSON int", id="a-number"),
+    # A declaration whose coverage lists are damaged. Composition iterates them,
+    # so `null` here was a TypeError at `compose` rather than a refusal at load.
+    pytest.param(lambda text: json.dumps({**json.loads(text), "qualified": None}),
+                 "`qualified` must be a list", id="qualified-null"),
+    pytest.param(lambda text: json.dumps({**json.loads(text), "qualified": "outcome"}),
+                 "`qualified` must be a list", id="qualified-a-string"),
+    pytest.param(lambda text: json.dumps({**json.loads(text), "out_of_scope": ["ci step"]}),
+                 "`out_of_scope` must map", id="out-of-scope-a-list"),
 ])
 def test_a_damaged_activation_does_not_fall_back(repo, mangle, because):
     activate(repo)
@@ -101,6 +114,7 @@ def test_a_damaged_activation_does_not_fall_back(repo, mangle, because):
     for command in (["run", "--output", str(repo / ".verification" / "after.json")],
                     ["compose", str(repo / ".verification" / "local.json")]):
         code, output = cli(repo, *command)
+        assert "Traceback" not in output, f"{command}: a crash is not a refusal\n{output}"
         assert code == 2, f"{command}: {output}"
         assert because in output, f"{command}: {output}"
         assert "READY FOR HUMAN GATE     TRUE" not in output

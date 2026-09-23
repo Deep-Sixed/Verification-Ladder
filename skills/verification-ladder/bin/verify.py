@@ -2305,12 +2305,33 @@ def authority_record(repo: Path) -> dict | None:
             f"Refusing rather than falling back to {SCHEMA}. Restore the file, or delete it and "
             f"re-run `verify.py activate` over evidence that qualifies."
         ) from None
-    if not isinstance(record, dict) or record.get("schema") != AUTHORITY_SCHEMA:
+    # Valid JSON is not the same as a declaration. `[1]`, `"x"` and `5` all
+    # parse, and reading `.get` off them raised AttributeError - a traceback
+    # where this function promises a refusal that names the file.
+    if not isinstance(record, dict):
+        raise blocked(f"{path}: not a {AUTHORITY_SCHEMA} declaration: it holds a JSON "
+                      f"{type(record).__name__}, not a table. Restore the file, or delete it and "
+                      f"re-run `verify.py activate`.")
+    if record.get("schema") != AUTHORITY_SCHEMA:
         raise blocked(f"{path}: not a {AUTHORITY_SCHEMA} declaration (schema "
-                      f"{(record or {}).get('schema')!r} if it is a table at all)")
+                      f"{record.get('schema')!r})")
     if record.get("authority") != SCHEMA_V3:
         raise blocked(f"{path}: declares authority {record.get('authority')!r}, which this release "
                       f"does not implement. Refusing rather than reading it as {SCHEMA}.")
+    # The two coverage lists composition reads. Checked here, once, so that a
+    # damaged list is refused as a damaged declaration rather than surfacing as
+    # a TypeError from whichever command happens to iterate it first.
+    qualified = record.get("qualified")
+    if "qualified" in record and not (
+            isinstance(qualified, list) and all(isinstance(name, str) for name in qualified)):
+        raise blocked(f"{path}: `qualified` must be a list of predicate names, got {qualified!r}. "
+                      f"Re-run `verify.py qualify` and `verify.py activate`.")
+    out_of_scope = record.get("out_of_scope")
+    if "out_of_scope" in record and not (
+            isinstance(out_of_scope, dict)
+            and all(isinstance(key, str) and isinstance(value, str) for key, value in out_of_scope.items())):
+        raise blocked(f"{path}: `out_of_scope` must map predicate names to reasons, got {out_of_scope!r}. "
+                      f"Re-run `verify.py qualify` and `verify.py activate`.")
     return record
 
 
