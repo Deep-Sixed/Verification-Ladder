@@ -226,7 +226,38 @@ def test_check_reads_an_evidence_3_record(repo):
     (repo / "src.txt").write_text("moved\n")
     code, output = cli(repo, "check", str(local))
     assert code == 2, output
-    assert "repository differs from this record" in output
+    assert "repository.worktree_state differs from this record" in output
+
+
+def test_check_names_drift_the_way_the_rest_of_the_verifier_does(repo):
+    """One reading of "which dimensions of the target differ", not two.
+
+    `check` grew its own comparison over the target while `target_drift` lived
+    on an unlanded branch, and the two disagreed on granularity: the helper
+    names `repository.worktree_state`, the local one named `repository`. A
+    verifier that answers "what moved" two ways teaches the reader to trust
+    neither, so `check` delegates, and a stale record is described in the
+    vocabulary a drifted run already prints.
+    """
+    activate(repo)
+    local = repo / ".verification" / "v3.json"
+    assert cli(repo, "run", "--output", str(local))[0] == 0
+
+    (repo / "src.txt").write_text("moved\n")
+    code, checked = cli(repo, "check", str(local))
+    assert code == 2, checked
+    assert "repository.worktree_state differs from this record" in checked
+    assert "repository differs from this record" not in checked, \
+        "the coarse dimension name would hide which part of the repository moved"
+
+    # The same move, seen from the other side: a gate that writes into the tree
+    # it is measuring. `run` names the dimension from `target_drift` directly,
+    # and it is the name `check` just printed.
+    (repo / "verification.toml").write_text(
+        LOCAL_ONLY.replace('unit = "true"', 'unit = "sh -c \'printf moved-again > src.txt\'"'))
+    code, ran = cli(repo, "run", "--output", str(repo / ".verification" / "drifted.json"))
+    assert code == 2, ran
+    assert "moved  repository.worktree_state" in ran
 
 
 def test_check_refuses_a_shadow_record(repo):

@@ -2878,11 +2878,15 @@ def command_check(args) -> int:
             raise blocked(f"{path}: shadow evidence/3 is diagnostic only and binds to nothing to check")
         current = v3_current_target(repo, policy(repo), exclude)
         bound = record.get("target_state") or {}
-        # Named per dimension rather than reduced to one digest: a record that
-        # still describes this worktree but names a runtime that has been
-        # replaced is stale for a reason worth printing.
-        moved = sorted({dimension for dimension in set(bound) | set(current)
-                        if bound.get(dimension) != current.get(dimension)}) if bound else ["target_state"]
+        # `target_drift`, the same comparison `run` uses to decide whether a gate
+        # moved the target underneath itself. This was a local set comprehension
+        # while that helper lived on an unlanded branch; two readings of "which
+        # dimensions differ" is one more than a verifier should have, and the
+        # helper is the finer of the two - it names `repository.worktree_state`
+        # rather than `repository`, so the reader learns which part moved.
+        # `bound` empty means the record binds to nothing at all, which is not a
+        # comparison this can make: it stays STALE, named for what is missing.
+        moved = target_drift(bound, current) if bound else ["target_state"]
         verdict = STALE if moved else record.get("verdict", BLOCKED)
         summarize_v3_record(record | {"verdict": verdict}, path, file=sys.stdout, moved=moved)
         return EXIT[verdict]
