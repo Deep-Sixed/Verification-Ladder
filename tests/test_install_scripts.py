@@ -36,7 +36,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 INSTALLER = REPO / "scripts" / "install-ladder.sh"
 CHECKER = REPO / "scripts" / "check-install.sh"
-PIN = "760977f69d6b74b9888be4c9cbb404f7726bea73"
+PIN = "c86bf47e70d7a3aa18c968011b487190e2becbea"
 ORIGIN = "https://github.com/Deep-Sixed/Verification-Ladder"
 
 
@@ -318,7 +318,7 @@ def test_installer_rejects_unknown_arguments(tmp_path):
 
 
 def test_installer_refuses_missing_sibling(tmp_path):
-    """$PIN does not contain check-install.sh, so it cannot be recovered later."""
+    """$PIN carries only an older checker, so this one cannot be recovered later."""
     solo = tmp_path / "bin"
     solo.mkdir()
     shutil.copy(INSTALLER, solo / "install-ladder.sh")
@@ -510,6 +510,24 @@ def test_digest_read_failure_is_not_a_mismatch(tmp_path, stub, why):
     assert "could not digest" in r.stderr, why
     assert "one reviewed pair" not in r.stderr, "a failed probe must not read as a mismatch"
     assert not (tmp_path / ".local" / "share" / "verification-ladder").exists()
+
+
+def test_the_pin_installs_the_hardened_release():
+    """The installer must deliver the verifier the rest of this repository describes.
+
+    It pinned 760977f: the build from before execution binding, the CI chain and
+    the committed adoption line, reporting `evidence-v3.1`. A scripted install
+    therefore got none of that hardening, under the same contract identity as a
+    build that had it. Hardcoded rather than compared with the working tree,
+    because a future contract bump lands one PR before the pin can follow it.
+    """
+    assert PIN != "760977f69d6b74b9888be4c9cbb404f7726bea73"
+    runtime = _git("show", f"{PIN}:skills/verification-ladder/bin/verify.py", cwd=REPO).stdout
+    assert 'COMPATIBILITY = "evidence-v3.2"' in runtime
+    assert 'VERSION = "0.3.0"' in runtime
+    assert 'EVIDENCE_CONTRACT = "evidence"' in runtime, "the pinned runtime cannot read the adoption line"
+    for script in (INSTALLER, CHECKER):
+        assert f"PIN={PIN}" in script.read_text(), f"{script.name} pins a different runtime"
 
 
 def test_network_surface_has_not_moved():

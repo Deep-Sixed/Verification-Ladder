@@ -200,10 +200,12 @@ rather than reporting a success it did not establish.
 
 ### Where the bootstrap tooling lives
 
-Neither script is in the pinned checkout. The pin predates `scripts/`, so
-detaching `~/src/verification-ladder` to it *removes both scripts from that
-directory* - including `install-ladder.sh` while it is running. The installer
-therefore copies the pair out first, to
+The pinned checkout is not where these scripts run from. Detaching
+`~/src/verification-ladder` to the pin *replaces both scripts in that directory*
+with the pin's own copy, including `install-ladder.sh` while it is running. That
+copy is an older pair, reviewed with an older pin, so running it would check
+the install against the wrong runtime. The installer therefore copies the pair
+it was reviewed with out first, to
 
 ```
 ${XDG_DATA_HOME:-~/.local/share}/verification-ladder/
@@ -212,7 +214,8 @@ ${XDG_DATA_HOME:-~/.local/share}/verification-ladder/
     PROVENANCE
 ```
 
-and names that path in its closing message. Run the checker from there:
+and names that path in its closing message. Run the checker from there, never
+from `~/src/verification-ladder/scripts/`:
 
 ```sh
 ~/.local/share/verification-ladder/check-install.sh     # --codex to check Codex too
