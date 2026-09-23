@@ -279,9 +279,13 @@ when the task legitimately changes what a gate means - the composite then reads
 doing its job.
 
 `check` re-binds one record to the checkout in front of you under either
-contract. For an evidence/3 record it re-binds the whole declared target, so a
-record that still describes this worktree but names a runtime that has since
-been replaced reads STALE, and says which dimension moved.
+contract. For an evidence/3 record it re-binds every dimension the record binds
+to, and always the repository, so a record that still describes this worktree
+but names a runtime that has since been replaced reads STALE, and says which
+dimension moved - `repository.worktree_state` rather than `repository`, in the
+same vocabulary `run` uses for drift. A CI record binds the repository alone,
+since a clean checkout of one commit is all CI establishes, so a declared
+runtime cannot expire it.
 
 See `docs/design/evidence-v3.md` §M for what each stage must establish before
 the next, and §M4 for why the authority switch is its own review point.
