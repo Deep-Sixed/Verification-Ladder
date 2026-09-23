@@ -2712,11 +2712,12 @@ def command_import_ci(args) -> int:
     up to date with its base, and quietly false the moment it is not.
     """
     repo = require_repository(Path(args.repo).resolve())
-    run, job = load_json(Path(args.run)), load_json(Path(args.job))
     declared = policy(repo)
-    # Before the payload is examined, as in `run`: a contract that refuses is
-    # the answer, whatever the payload says.
+    # Before the payload is read at all, as in `run`: a contract that refuses is
+    # the answer, whatever the payload says - including that it does not parse.
+    # Resolving it after `load_json` let a malformed payload answer first.
     active = authority_active(repo, declared)
+    run, job = load_json(Path(args.run)), load_json(Path(args.job))
     sha = run.get("head_sha")
     if not sha:
         raise blocked(f"{args.run}: no head_sha; cannot bind CI evidence to a commit")

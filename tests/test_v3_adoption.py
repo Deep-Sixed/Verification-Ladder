@@ -212,6 +212,28 @@ def test_import_ci_refuses_a_contract_before_reading_the_payload(tmp_path):
     assert "run is for" not in output, "the payload was examined under a contract that refuses"
 
 
+@pytest.mark.parametrize(("run_text", "job_text"), [
+    pytest.param("not json", "{}", id="malformed-run"),
+    pytest.param("{}", "not json", id="malformed-job"),
+    pytest.param("not json", "not json", id="both-malformed"),
+])
+def test_import_ci_refuses_a_contract_before_parsing_the_payload(tmp_path, run_text, job_text):
+    """Before the payload is read at all, not merely before it is examined.
+
+    The contract was resolved after `load_json`, so an unparseable payload
+    answered first and the refusal the reader actually needed never appeared.
+    """
+    root = bare_repo(tmp_path, LOCAL_ONLY.replace(V3, "evidence/typo"))
+    run_payload, job_payload = tmp_path / "run.json", tmp_path / "job.json"
+    run_payload.write_text(run_text)
+    job_payload.write_text(job_text)
+    code, output = cli(root, "import-ci", "--run", str(run_payload), "--job", str(job_payload))
+    assert code == 2, output
+    assert "evidence must be" in output, output
+    assert "unreadable" not in output, "the payload answered before the contract"
+    assert "JSONDecodeError" not in output
+
+
 # --------------------------------------------------------------------------
 # The contract is committed, so it survives the evidence directory.
 # --------------------------------------------------------------------------
