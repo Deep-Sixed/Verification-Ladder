@@ -7,6 +7,7 @@ so M3 builds the surfaces rather than qualifying around them - and builds them
 without authority, which is the part these tests are mostly about.
 """
 
+import importlib.util
 import json
 import subprocess
 import sys
@@ -15,6 +16,9 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "skills" / "verification-ladder" / "bin" / "verify.py"
+_spec = importlib.util.spec_from_file_location("ladder_verify_prereq", SCRIPT)
+verify = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(verify)
 POLICY = '''required_gates = ["unit"]
 judgment_rungs = ["diff"]
 
@@ -194,6 +198,29 @@ def payload(repo, *, conclusion="success", step="Run the unit suite", repository
     return repo / ".verification" / "ci.json"
 
 
+def import_attempt(repo, **over):
+    """`payload`, but returning what the importer did instead of assuming it wrote."""
+    target = repo / ".verification" / "ci.json"
+    target.unlink(missing_ok=True)
+    directory = repo / ".verification" / "import"
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+                         text=True, check=True).stdout.strip()
+    directory.mkdir(parents=True, exist_ok=True)
+    fields = {"repository": "acme/widget", "workflow": ".github/workflows/ci.yml",
+              "job": "validate", "job_run_id": 42, "job_head_sha": sha, **over}
+    (directory / "run.json").write_text(json.dumps({
+        "id": 42, "run_attempt": 1, "head_sha": sha, "event": "push", "head_branch": "main",
+        "conclusion": "success", "path": fields["workflow"],
+        "repository": {"full_name": fields["repository"]}}))
+    (directory / "job.json").write_text(json.dumps({
+        "id": 7, "run_id": fields["job_run_id"], "run_attempt": 1,
+        "head_sha": fields["job_head_sha"], "name": fields["job"],
+        "steps": [{"name": "Run the unit suite", "conclusion": "success"}]}))
+    code, output = cli(repo, "import-ci", "--run", str(directory / "run.json"),
+                       "--job", str(directory / "job.json"), "--output", str(target))
+    return code, output, target
+
+
 def test_the_shadow_keeps_the_raw_step_conclusions(repo):
     payload(repo)
     shadow = json.loads((repo / ".verification" / "shadow" / "ci.v3.json").read_text())
@@ -253,19 +280,124 @@ def test_a_shadow_without_raw_steps_cannot_be_read(repo):
                      "a job from another run establishes nothing", id="run"),
     ],
 )
-def test_the_provenance_chain_is_checked_against_the_policy(repo, label, over, because):
-    record = payload(repo, **over)
+def test_the_provenance_chain_is_refused_at_import(repo, label, over, because):
+    """The chain is now checked before a record exists, not only when one is read.
+
+    An importer that writes a PASS-shaped record and leaves the links to be
+    checked at composition has already produced the artifact someone will quote.
+    """
+    code, output, target = import_attempt(repo, **over)
+    assert code == 2, f"{label}: {output}"
+    assert because in output, f"{label}: {output}"
+    assert not target.exists(), f"{label}: a refused import must write no evidence"
+
+
+@pytest.mark.parametrize(
+    ("label", "over", "because"),
+    [
+        pytest.param("another repository", {"repository": "evil/fork"},
+                     "the repository under verification is", id="repository"),
+        pytest.param("wrong workflow", {"workflow": ".github/workflows/nightly.yml"},
+                     "the gate rests on", id="workflow"),
+        pytest.param("wrong job", {"job": "smoke"}, "the gate rests on", id="job"),
+        pytest.param("job from another run", {"job_run_id": 99},
+                     "a job from another run establishes nothing", id="run"),
+        pytest.param("job ran another commit", {"job_head_sha": "0" * 40},
+                     "job ran 000000000000", id="commit"),
+    ],
+)
+def test_the_provenance_chain_is_checked_again_at_composition(repo, label, over, because):
+    """Defence in depth: a record that reached disk by any route is still read.
+
+    The import gate above cannot see a record edited afterwards, or one written
+    by an older verifier. So the same chain is re-derived from what the record
+    preserved - which is why `job_head_sha` has to be preserved at all.
+    """
+    record = payload(repo)
+    path = repo / ".verification" / "shadow" / "ci.v3.json"
+    shadow = json.loads(path.read_text())
+    for key, value in over.items():
+        shadow["source"]["job_run_id" if key == "job_run_id" else key] = value
+    path.write_text(json.dumps(shadow, indent=2))
     outcome, detail, _ = row(repo, record, "ci provenance")
     assert outcome == "DISAGREE", f"{label}: {detail}"
     assert because in detail, f"{label}: {detail}"
 
 
-def test_the_expectation_does_not_come_from_the_payload_being_checked(repo):
-    """Without a declared expectation there is nothing to check a workflow against."""
+def test_a_record_without_the_job_attempt_cannot_be_bound(repo):
+    """The comparison path reads the job's own attempt, never the run's.
+
+    It was `source.get("job_run_attempt", source.get("run_attempt"))`, so a
+    record with the field deleted was compared against the run's attempt - a
+    value with itself - and the link reported agreement over no job-side attempt
+    identity at all. `ci_provenance_status` refuses a None here; the fallback
+    manufactured a value before it could.
+    """
+    record = payload(repo)
+    path = repo / ".verification" / "shadow" / "ci.v3.json"
+    shadow = json.loads(path.read_text())
+    assert "job_run_attempt" in shadow["source"], "the importer must preserve it"
+    del shadow["source"]["job_run_attempt"]
+    path.write_text(json.dumps(shadow, indent=2))
+    outcome, detail, _ = row(repo, record, "ci provenance")
+    assert outcome == "DISAGREE", detail
+    assert "cannot bind job to run attempt" in detail
+
+
+def test_a_record_without_the_job_commit_cannot_be_bound(repo):
+    """Records written before the job's own commit was preserved must not compose.
+
+    The importer stored only the run's head_sha, and the composition path rebuilt
+    the job from it - so `job.head_sha != run.head_sha` compared a value with
+    itself and could never fail. A record with the field missing is refused
+    rather than read as agreeing.
+    """
+    record = payload(repo)
+    path = repo / ".verification" / "shadow" / "ci.v3.json"
+    shadow = json.loads(path.read_text())
+    assert "job_head_sha" in shadow["source"], "the importer must preserve it"
+    del shadow["source"]["job_head_sha"]
+    path.write_text(json.dumps(shadow, indent=2))
+    outcome, detail, _ = row(repo, record, "ci provenance")
+    assert outcome == "DISAGREE", detail
+    assert "predates job-commit binding" in detail
+
+
+def test_an_undeclared_expectation_is_refused_rather_than_skipped(repo):
+    """The links with nothing to compare against were simply not checked.
+
+    `[shadow.ci]` was optional, and `ci_provenance_status` skips a link whose
+    expectation is absent - so a policy that declared none accepted a run from
+    any repository, workflow and job. Optional meant absent in practice.
+    """
     (repo / "verification.toml").write_text(POLICY.split("[shadow.ci]")[0])
-    record = payload(repo, workflow=".github/workflows/anything.yml", job="anything")
-    assert row(repo, record, "ci provenance")[0] == "AGREE", (
-        "an undeclared expectation is unchecked, which is why it has to be declared")
-    (repo / "verification.toml").write_text(POLICY)
-    record = payload(repo, workflow=".github/workflows/anything.yml")
-    assert row(repo, record, "ci provenance")[0] == "DISAGREE"
+    code, output, target = import_attempt(repo, workflow=".github/workflows/anything.yml",
+                                          job="anything")
+    assert code == 2, output
+    assert "declares repository, workflow, job nowhere" in output
+    assert not target.exists()
+
+
+def test_the_expectation_does_not_come_from_the_payload_being_checked(repo):
+    """Declared, never read from the run under examination.
+
+    Checking a run's workflow against the workflow that same run names compares a
+    value with itself. The payload below is internally consistent - run.path and
+    job.name agree with each other - and is still refused, because they disagree
+    with the policy.
+    """
+    code, output, _ = import_attempt(repo, workflow=".github/workflows/anything.yml")
+    assert code == 2, output
+    assert "the gate rests on" in output
+
+
+def test_ci_expectations_are_governed(repo):
+    """Widening the accepted authority mid-task is a definition change, not a note."""
+    baseline = verify.completion_contract(verify.policy(repo))
+    assert baseline["ci"] == {"repository": "acme/widget",
+                              "workflow": ".github/workflows/ci.yml", "job": "validate"}
+    (repo / "verification.toml").write_text(POLICY.replace("acme/widget", "evil/fork"))
+    widened = verify.completion_contract(verify.policy(repo))
+    assert widened["ci"]["repository"] == "evil/fork"
+    assert verify.digest_of(baseline) != verify.digest_of(widened), (
+        "the completion contract digest must move, or governance cannot see it")

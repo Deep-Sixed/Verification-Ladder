@@ -394,6 +394,13 @@ def shadow_declaration(declared: dict) -> dict:
     for key in ("required_gates", "judgment_rungs", "ci_head_events"):
         if key in declared:
             view[key] = declared[key]
+    # Carried into the view because the baseline captures its completion contract
+    # from here. Left out, the expectations hashed at baseline and the ones hashed
+    # at composition were both empty, so widening them was invisible to governance
+    # - the one edit that most needs to be visible.
+    expectations = ci_expectations(declared)
+    if expectations:
+        view["ci"] = expectations
     base = declared.get("gates")
     authoritative = ((base.get("local") if isinstance(base, dict) else None) or {},
                      declared.get("ci_steps") or {})
@@ -436,10 +443,76 @@ def shadow_runtime(repo: Path, declared: dict) -> dict | None:
     return runtime_identity(facts)
 
 
+CI_IDENTITIES = ("repository", "workflow", "job")
+
+
+def ci_expectations(declared: dict) -> dict:
+    """Who must have produced a CI result for it to establish anything here.
+
+    Declared by the project, never read out of the payload under examination:
+    checking a run's workflow against the workflow that same run claims compares
+    a value with itself and passes for any payload at all.
+
+    `[ci]` is where this belongs. `[shadow.ci]` is still read, for policies
+    written while evidence/3 had no authority - but a requirement kept in a table
+    documented as establishing nothing is a requirement nobody treats as one.
+    """
+    for table in (declared.get("ci"), (declared.get(SHADOW_POLICY) or {}).get("ci")):
+        if isinstance(table, dict) and any(table.get(field) for field in CI_IDENTITIES):
+            return {field: table.get(field) for field in CI_IDENTITIES}
+    return {}
+
+
+def require_ci_expectations(declared: dict) -> dict:
+    """CI evidence without declared identities is unbindable, so refuse to make any.
+
+    A gate that only CI can run rests on a result from one repository, one
+    workflow and one job. With none of them declared, `ci_provenance_status` has
+    nothing to compare against and skips those links - and an unrelated
+    repository's run satisfies the gate. Optional here means absent in practice.
+    """
+    expected = ci_expectations(declared)
+    missing = [field for field in CI_IDENTITIES if not expected.get(field)]
+    if missing:
+        raise blocked(
+            "CI evidence needs the identities it must have come from, and this policy declares "
+            f"{', '.join(missing)} nowhere. Add them to verification.toml:\n\n"
+            "  [ci]\n"
+            '  repository = "owner/repo"\n'
+            '  workflow = ".github/workflows/ci.yml"\n'
+            '  job = "validate"\n\n'
+            "Declared here rather than read from the payload: a run checked against the workflow "
+            "that same run names compares a value with itself and passes for any payload at all."
+        )
+    return expected
+
+
 def shadow_target(repo: Path, declared: dict, repository: dict) -> dict:
     """The target a shadow record binds to: always repository, runtime when readable."""
     runtime = shadow_runtime(repo, declared)
     return {"repository": repository, **({"runtime": runtime} if runtime else {})}
+
+
+def target_drift(before: dict, after: dict) -> list[str]:
+    """Which declared dimensions of the target moved while the gates ran.
+
+    Named rather than reduced to a flag. "The worktree moved" and "the runtime
+    manifest was replaced" are different failures with different repairs, and a
+    single boolean sends the reader looking for the wrong one. Dimensions present
+    in only one of the two are reported too: a runtime that became unreadable
+    mid-run is a change in what the evidence could bind to.
+    """
+    moved = []
+    for dimension in sorted(set(before) | set(after)):
+        left, right = before.get(dimension), after.get(dimension)
+        if left == right:
+            continue
+        if dimension == "repository" and isinstance(left, dict) and isinstance(right, dict):
+            moved += [f"repository.{key}" for key in sorted(set(left) | set(right))
+                      if left.get(key) != right.get(key)]
+        else:
+            moved.append(dimension)
+    return moved
 
 
 # --- verification.ladder.evidence/3 model -------------------------------------
@@ -676,6 +749,11 @@ def completion_contract(declared: dict) -> dict:
         "required_gates": list(declared.get("required_gates") or []),
         "judgment_rungs": list(declared.get("judgment_rungs") or []),
         "ci_head_events": list(declared.get("ci_head_events") or ["push"]),
+        # Which repository, workflow and job may establish a CI gate is a
+        # completion semantic, not a note. Widening it mid-task - to the fork the
+        # green run happens to be from - is exactly the edit that must surface as
+        # DEFINITION CHANGE PENDING rather than as a clean climb.
+        "ci": ci_expectations(declared),
     }
 
 
@@ -937,7 +1015,13 @@ def ci_provenance_status(run: dict, job: dict, expected: dict) -> tuple[str, str
     if attempts[0] != attempts[1]:
         return INADMISSIBLE, (f"job is from attempt {attempts[1]}, the run metadata is attempt "
                               f"{attempts[0]}")
-    if job.get("head_sha") and job["head_sha"] != sha:
+    # Not `if job.get("head_sha") and ...`: a job payload with no commit of its own
+    # then skipped the last link in the chain, and the importer discarded that
+    # field anyway, so the check compared the run's commit with itself.
+    if not job.get("head_sha"):
+        return INADMISSIBLE, ("job payload carries no head_sha, so the job cannot be bound to a "
+                              "commit; the run naming one establishes nothing about what the job ran")
+    if job["head_sha"] != sha:
         return INADMISSIBLE, f"job ran {job['head_sha'][:12]}, the run names {sha[:12]}"
     if expected.get("workflow") and run.get("path") != expected["workflow"]:
         return INADMISSIBLE, (f"run is workflow {run.get('path')!r}, the gate rests on "
@@ -1562,17 +1646,31 @@ def compare_ci_source(shadow: dict, authoritative: dict, declared: dict, governi
     # Declared, never taken from the payload under examination. Reading the
     # expected workflow out of the run that claims to be it makes the check
     # compare a value with itself, which passes for any payload at all.
-    expect = (declared.get(SHADOW_POLICY) or {}).get("ci") or {}
-    expected = {"head_sha": authoritative["repository"]["head"], "repository": expect.get("repository"),
-                "workflow": expect.get("workflow"), "job": expect.get("job"),
+    expected = {"head_sha": authoritative["repository"]["head"], **ci_expectations(declared),
                 "events": declared.get("ci_head_events") or ["push"]}
     run = {"id": source.get("run_id"), "head_sha": source.get("head_sha"), "event": source.get("event"),
            "run_attempt": source.get("run_attempt"), "path": source.get("workflow"),
            "repository": {"full_name": source.get("repository")}}
-    job = {"run_id": source.get("job_run_id"), "run_attempt": source.get("job_run_attempt", source.get("run_attempt")),
-           "head_sha": source.get("head_sha"), "name": source.get("job"),
+    # The job's OWN commit and attempt, never the run's. source["head_sha"] is
+    # the run's commit, and reading it here made the job-to-commit link compare a
+    # value with itself. Defaulting the attempt to source["run_attempt"] did the
+    # same thing one field over, and worse: it manufactured a value where the
+    # primitive would have refused a None, so the attempt link could report
+    # agreement over a record carrying no job-side attempt identity at all.
+    job = {"run_id": source.get("job_run_id"), "run_attempt": source.get("job_run_attempt"),
+           "head_sha": source.get("job_head_sha"), "name": source.get("job"),
            "steps": source.get("steps") or []}
-    status, why = ci_provenance_status(run, job, expected)
+    missing = [field for field in CI_IDENTITIES if not expected.get(field)]
+    if missing:
+        why = (f"this policy declares {', '.join(missing)} nowhere, so those links have nothing to "
+               f"be checked against; declare them in a [ci] table")
+        status = INADMISSIBLE
+    elif "job_head_sha" not in source:
+        why = ("this record predates job-commit binding: it carries no job_head_sha, so the job "
+               "cannot be bound to the commit. Re-run `verify.py import-ci`.")
+        status = INADMISSIBLE
+    else:
+        status, why = ci_provenance_status(run, job, expected)
     rows = [_row("-", "ci provenance", AGREE if status == ADMISSIBLE else DISAGREE,
                  source.get("run_id"), source.get("job_run_id"),
                  why or "repository, run, attempt, workflow, job, step and commit are one chain")]
@@ -1762,17 +1860,32 @@ def ci_status_for_v3(record: dict, declared: dict, repository: dict) -> list[str
     if record.get("authority") != "ci":
         return []
     source = record.get("source") or {}
-    expect = (declared.get(SHADOW_POLICY) or {}).get("ci") or {}
-    expected = {"head_sha": repository.get("head"), "repository": expect.get("repository"),
-                "workflow": expect.get("workflow"), "job": expect.get("job"),
+    expect = ci_expectations(declared)
+    missing = [field for field in CI_IDENTITIES if not expect.get(field)]
+    if missing:
+        return [(f"CI evidence cannot be bound: this policy declares {', '.join(missing)} nowhere. "
+                 "Add a [ci] table to verification.toml naming the repository, workflow and job "
+                 "that may establish a CI gate.")]
+    expected = {"head_sha": repository.get("head"), **expect,
                 "events": declared.get("ci_head_events") or ["push"]}
     run = {"id": source.get("run_id"), "head_sha": source.get("head_sha"), "event": source.get("event"),
            "run_attempt": source.get("run_attempt"), "path": source.get("workflow"),
            "repository": {"full_name": source.get("repository")}}
-    job = {"run_id": source.get("job_run_id"), "run_attempt": source.get("job_run_attempt", source.get("run_attempt")),
-           "head_sha": source.get("head_sha"), "name": source.get("job"), "steps": source.get("steps") or []}
+    findings = []
+    if "job_head_sha" not in source:
+        findings.append("CI record predates job-commit binding: it carries no job_head_sha, so the "
+                        "job cannot be bound to the commit. Re-run `verify.py import-ci`.")
+    # The job's OWN commit and attempt, never the run's. source["head_sha"] is
+    # the run's commit, and reading it here made the job-to-commit link compare a
+    # value with itself. Defaulting the attempt to source["run_attempt"] did the
+    # same thing one field over, and worse: it manufactured a value where the
+    # primitive would have refused a None, so the attempt link could report
+    # agreement over a record carrying no job-side attempt identity at all.
+    job = {"run_id": source.get("job_run_id"), "run_attempt": source.get("job_run_attempt"),
+           "head_sha": source.get("job_head_sha"), "name": source.get("job"), "steps": source.get("steps") or []}
     status, reason = ci_provenance_status(run, job, expected)
-    findings = [] if status == ADMISSIBLE else [reason]
+    if status != ADMISSIBLE:
+        findings.append(reason)
     for row in record.get("gates") or []:
         step = row.get("step")
         if step is None:
@@ -1841,6 +1954,21 @@ def command_compose_v3(args) -> int:
                    if predicate in covered else "")
                 + ". Re-run `verify.py qualify` and `verify.py activate`."
             )
+    # Before any per-gate reading. A record whose own verdict refused it cannot
+    # be rehabilitated by the rows inside it: a drifted run has passing gates by
+    # construction - they are what moved the tree - and reading only the rows
+    # composed the exact record the runner had already blocked. Checked here
+    # rather than relying on the state binding to disagree: binding is what
+    # caught this in v2, incidentally, and an incidental protection is one nobody
+    # is maintaining.
+    for path, record in zip(paths, records, strict=True):
+        if record.get("drift"):
+            moved = ", ".join(record.get("drift_dimensions") or []) or "the target"
+            findings.append(f"{path.name}: DRIFT - {moved} changed while the gates ran, so this "
+                            f"record establishes nothing about any single state")
+        elif record.get("verdict") in (BLOCKED, FAIL):
+            findings.append(f"{path.name}: record verdict is {record['verdict']}; a refused "
+                            f"execution is not evidence for the gates inside it")
     status, reason = verifier_status(records)
     if status != ADMISSIBLE:
         findings.append(reason)
@@ -2354,12 +2482,22 @@ def command_run(args) -> int:
     output = Path(args.output).resolve() if args.output else None
     exclude = relative_inside(repo, [output])
 
-    before = state_id(repo, exclude)
+    # Captured BEFORE the gates run. Evidence binds to the state the gates were
+    # measuring, not to whatever they left behind: binding after execution makes
+    # a gate that writes into the tree describe its own output, and the record
+    # then matches the checkout exactly because the gate put it there.
+    before_target = shadow_target(repo, declared, repository_identity(repo, exclude))
+    before = before_target["repository"]["worktree_state"]
     before_paths = state_paths(repo, exclude)
     dirty = is_dirty(repo, exclude)
     results = [run_gate(repo, name, command) for name, command in gates]
-    after = state_id(repo, exclude)
+    after_target = shadow_target(repo, declared, repository_identity(repo, exclude))
+    after = after_target["repository"]["worktree_state"]
     drift = before != after
+    # Wider than `drift`: the worktree digest cannot see a staged change or a
+    # replaced runtime manifest, and a gate that moves either has still measured
+    # one state and left another.
+    moved_dimensions = target_drift(before_target, after_target)
 
     record = new_record(repo, "local", results, exclude, state=before,
                         gate_set="policy" if not args.gate else "custom")
@@ -2372,13 +2510,18 @@ def command_run(args) -> int:
         # is .gitignore rather than the change under verification.
         record["drift_paths"] = sorted({path for _, path in before_paths ^ state_paths(repo, exclude)})
     if authority_active(repo):
+        v3_drift = bool(moved_dimensions)
+        v3_verdict = verdict_of(results, v3_drift)
+        after_state = {"target_state_after": after_target,
+                       "drift_dimensions": moved_dimensions,
+                       "drift_paths": record.get("drift_paths", [])} if v3_drift else {}
         direct = make_authoritative_v3(shadow_record(
-            repo, declared, results, "local",
-            shadow_target(repo, declared, repository_identity(repo, exclude)),
-            recorded_at=record["recorded_at"], drift=drift, gate_set=record["gate_set"]), record["verdict"])
+            repo, declared, results, "local", before_target,
+            recorded_at=record["recorded_at"], drift=v3_drift, gate_set=record["gate_set"],
+            **after_state), v3_verdict)
         emit(direct, output)
         summarize_v3_record(direct, output, file=sys.stderr)
-        return EXIT[record["verdict"]]
+        return EXIT[v3_verdict]
 
     emit(record, output)
     summarize(record, output, file=sys.stderr)
@@ -2387,9 +2530,11 @@ def command_run(args) -> int:
     # shadow record describes the same `results`, so no gate runs twice, and
     # nothing below can change what was just reported.
     emit_shadow(repo, output, lambda: shadow_record(
-        repo, declared, results, "local",
-        shadow_target(repo, declared, repository_identity(repo, exclude)),
-        recorded_at=record["recorded_at"], drift=drift, gate_set=record["gate_set"]))
+        repo, declared, results, "local", before_target,
+        recorded_at=record["recorded_at"], drift=bool(moved_dimensions),
+        gate_set=record["gate_set"],
+        **({"target_state_after": after_target, "drift_dimensions": moved_dimensions,
+            "drift_paths": record.get("drift_paths", [])} if moved_dimensions else {})))
     return EXIT[record["verdict"]]
 
 
@@ -2529,9 +2674,27 @@ def command_import_ci(args) -> int:
             f"{'/'.join(accepted)} run for this commit instead."
         )
 
+    # The whole chain, before any record exists. An importer that writes a
+    # PASS-shaped record and leaves the links to be checked at composition has
+    # already produced the artifact someone will quote; the composer refusing it
+    # later is a second opinion, not a gate.
+    ci_gates = gate_map(declared, "ci_steps")
+    if ci_gates:
+        expected = require_ci_expectations(declared)
+        status, reason = ci_provenance_status(
+            {"id": run.get("id"), "head_sha": sha, "event": event,
+             "run_attempt": run.get("run_attempt"), "path": run.get("path"),
+             "repository": run.get("repository") or {}},
+            {"run_id": job.get("run_id"), "run_attempt": job.get("run_attempt"),
+             "head_sha": job.get("head_sha"), "name": job.get("name"),
+             "steps": job.get("steps") or []},
+            {**expected, "head_sha": sha, "events": accepted})
+        if status != ADMISSIBLE:
+            raise blocked(f"{args.job}: {reason}")
+
     conclusions = {step.get("name"): step.get("conclusion") for step in job.get("steps", [])}
     gates = []
-    for gate, step in gate_map(declared, "ci_steps").items():
+    for gate, step in ci_gates.items():
         conclusion = conclusions.get(step)
         entry = {"name": gate, "kind": EXECUTION, "step": step,
                  "status": CI_CONCLUSIONS.get(conclusion, BLOCKED)}
@@ -2555,6 +2718,10 @@ def command_import_ci(args) -> int:
               "run_id": run.get("id"), "run_attempt": run.get("run_attempt"),
               "workflow": run.get("path"), "job": job.get("name"),
               "job_run_id": job.get("run_id"), "job_run_attempt": job.get("run_attempt"),
+              # The job's OWN commit, kept separate from the run's. Dropping it
+              # left `ci_status_for_v3` rebuilding the job from the run's sha, so
+              # the commit link compared a value with itself and could not fail.
+              "job_head_sha": job.get("head_sha"),
               "event": event, "head_sha": sha,
               # The conclusions as given, not the statuses v2 derived from
               # them. Reading back a summary of an answer only establishes
@@ -2661,6 +2828,18 @@ def command_compose(args) -> int:
     rows = compose_rows(records)
     declared = policy(repo)
     findings = completion_findings(rows, declared)
+    # v2 has always caught a drifted run, but only because its evidence binds to
+    # the pre-execution state and the gate's own output then moves the checkout
+    # away from it - a state mismatch, reported as staleness. That is the right
+    # answer for the wrong reason, and it disappears the moment anything restores
+    # the tree. Say it directly.
+    for path, record in zip(paths, records, strict=True):
+        if record.get("drift"):
+            findings.append(f"{path.name}: DRIFT - the repository changed while the gates ran, so "
+                            f"this record establishes nothing about any single state")
+        elif record.get("verdict") in (BLOCKED, FAIL):
+            findings.append(f"{path.name}: record verdict is {record['verdict']}; a refused "
+                            f"execution is not evidence for the gates inside it")
     stale = composed_state != current
     verdict = STALE if stale else (INCOMPLETE if findings else COMPLETE)
 
@@ -2751,6 +2930,21 @@ def summarize_v3_record(record: dict, path: Path | None, *, file, moved: list[st
         detail = gate.get("reason") or gate.get("note") or (
             f"exit {gate['exit_code']}" if "exit_code" in gate else gate.get("step", gate["kind"]))
         print(f"  {gate['status']:<7} {gate['gate']} ({detail})", file=file)
+    # The v2 summary has explained drift since the beginning; the v3 summary
+    # printed BLOCKED and nothing else, so the one line a reader needed in order
+    # to know WHY was missing exactly where the verdict was hardest to act on.
+    if record.get("drift"):
+        after = ((record.get("target_state_after") or {}).get("repository") or {}).get("worktree_state")
+        print("  drift    target changed while gates ran; results bind to no single state", file=file)
+        for dimension in record.get("drift_dimensions") or []:
+            print(f"           moved  {dimension}", file=file)
+        if after and after != repository.get("worktree_state"):
+            print(f"           after  {after}", file=file)
+        for changed in record.get("drift_paths") or []:
+            print(f"           path   {changed}", file=file)
+        print("           this record binds to the state the gates MEASURED, not the one they\n"
+              "           left. Git-ignore disposable tool output; if a gate changed real\n"
+              "           repository state, BLOCKED is the right answer.", file=file)
     if path:
         print(f"  evidence {path}", file=file)
 
