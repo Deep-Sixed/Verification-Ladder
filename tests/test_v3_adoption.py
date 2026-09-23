@@ -122,6 +122,54 @@ def test_a_damaged_activation_does_not_fall_back(repo, mangle, because):
             "a damaged declaration must not be answered with the older contract"
 
 
+def bare_repo(tmp_path, policy_text=None):
+    """A repository with no policy, or with exactly the policy text given."""
+    root = tmp_path / "bare"
+    root.mkdir()
+    (root / ".gitignore").write_text(".verification/\n")
+    (root / "src.txt").write_text("src\n")
+    if policy_text is not None:
+        (root / "verification.toml").write_text(policy_text)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false",
+                    "commit", "-qm", "base"], cwd=root, check=True)
+    return root
+
+
+def test_reading_the_contract_does_not_print_a_refusal_it_then_ignores(tmp_path):
+    """`attest` has never needed a policy, and must not announce BLOCKED and then succeed.
+
+    Finding out which contract applies read the policy through `policy()` and
+    caught its SystemExit. `blocked` prints as it builds that exit, so the
+    onboarding refusal reached the reader anyway - twice, once for the authority
+    check and once for the migration notice - above a command that exited 0.
+    """
+    root = bare_repo(tmp_path)
+    code, output = cli(root, "attest", "--rung", "diff", "--note", "read it")
+    assert code == 0, output
+    assert "attested diff" in output
+    assert "no verification policy found" not in output, output
+    assert "BLOCKED" not in output, output
+
+
+def test_a_policy_that_does_not_parse_is_not_read_as_silent(tmp_path):
+    """Broken is not absent, and the refusal has to name what is actually wrong.
+
+    The same `except SystemExit` read an unparseable policy as `{}`, so with an
+    activation record present the reader was told the policy "does not adopt"
+    evidence/3 - sending them to add a line their policy may well already have.
+    """
+    root = bare_repo(tmp_path, LOCAL_ONLY + "\nthis is not toml\n")
+    (root / ".verification").mkdir()
+    authority(root).write_text(json.dumps({"schema": AUTHORITY_SCHEMA, "authority": V3}))
+    code, output = cli(root, "attest", "--rung", "diff", "--note", "read it")
+    assert code == 2, output
+    assert "policy does not parse" in output, output
+    assert "does not adopt" not in output, output
+    assert output.count("policy does not parse") == 1, "one refusal, stated once"
+
+
 # --------------------------------------------------------------------------
 # The contract is committed, so it survives the evidence directory.
 # --------------------------------------------------------------------------

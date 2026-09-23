@@ -283,6 +283,21 @@ def policy(repo: Path) -> dict:
     project. A repository that has declared nothing is BLOCKED: silence is not
     consent, and an unconfigured project must not read as a verified one.
     """
+    declared = declared_policy(repo)
+    if declared is None:
+        raise blocked(f"{repo}: {ONBOARDING}")
+    return declared
+
+
+def declared_policy(repo: Path) -> dict | None:
+    """The committed policy, or None when this repository declares none.
+
+    For a caller that has a meaning for "no policy" other than BLOCKED. `blocked`
+    prints as it builds the exit, so catching the SystemExit from `policy` does
+    not take the refusal back: it has already reached the reader, for a command
+    that then goes on to succeed. A policy that exists and does not parse is
+    still refused here - broken is not absent.
+    """
     for name, path in POLICY_FILES:
         config = repo / name
         try:
@@ -300,7 +315,7 @@ def policy(repo: Path) -> dict:
         if isinstance(declared, dict) and declared:
             refuse_inactive_v3(declared, config)
             return declared
-    raise blocked(f"{repo}: {ONBOARDING}")
+    return None
 
 
 def refuse_inactive_v3(declared: dict, config: Path) -> None:
@@ -2351,15 +2366,18 @@ def authority_state(repo: Path, declared: dict | None = None) -> tuple[str | Non
     """
     record = authority_record(repo)
     if declared is None:
-        try:
-            declared = policy(repo)
-        except SystemExit:
-            # A repository with no policy has adopted no contract. Saying so here
-            # is not the same as tolerating it: every command that needs a policy
-            # reads one itself and is BLOCKED without it. What must still be
-            # caught is an activation record sitting in a repository whose policy
-            # cannot back it, which is the refusal below.
-            declared = {}
+        # A repository with no policy has adopted no contract. Saying so here is
+        # not the same as tolerating it: every command that needs a policy reads
+        # one itself and is BLOCKED without it. What must still be caught is an
+        # activation record sitting in a repository whose policy cannot back it,
+        # which is the refusal below.
+        #
+        # Not `policy()` under `except SystemExit`. That printed the onboarding
+        # refusal before the handler ran, so `attest` in an unconfigured
+        # repository reported BLOCKED twice and then exited 0; and a policy that
+        # failed to parse was read as `{}`, which then blamed the activation
+        # record for a policy "that does not adopt it".
+        declared = declared_policy(repo) or {}
     contract = declared_contract(declared)
     if contract != SCHEMA_V3 and record is not None:
         raise blocked(
