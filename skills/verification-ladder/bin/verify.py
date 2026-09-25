@@ -191,13 +191,37 @@ def _hash_path(digest: "hashlib._Hash", repo: Path, relative: str) -> None:
         # content that lives outside the state being identified.
         digest.update(b"symlink:" + os.readlink(target).encode())
     elif target.is_dir():
-        for child in sorted(p for p in target.rglob("*") if p.is_file()):
-            digest.update(child.relative_to(repo).as_posix().encode())
-            digest.update(hashlib.sha256(child.read_bytes()).digest())
+        # The same rule as the top level, applied inside. `git status` reports an
+        # untracked nested repository as one directory entry, and hashing it
+        # through `rglob` and `is_file` followed any symlink within it, so the
+        # contents of a file outside the repository became part of its state id.
+        # An explicit walk that never follows links, rather than `rglob`, whose
+        # symlink handling changed between the interpreters CI runs.
+        children = []
+        for root, dirs, files in os.walk(target, followlinks=False):
+            children += [Path(root) / name for name in (*dirs, *files)]
+        for child in sorted(children):
+            if child.is_symlink():
+                digest.update(child.relative_to(repo).as_posix().encode())
+                digest.update(b"symlink:" + os.readlink(child).encode())
+            elif child.is_file():
+                digest.update(child.relative_to(repo).as_posix().encode())
+                digest.update(hashlib.sha256(child.read_bytes()).digest())
     elif target.is_file():
         digest.update(hashlib.sha256(target.read_bytes()).digest())
     else:
         digest.update(b"absent")
+
+
+def _excluded(path: str, exclude: frozenset[str]) -> bool:
+    """Whether a `git status` path is evidence rather than repository state.
+
+    An entry ending in "/" excludes everything beneath it; any other entry is
+    one exact path. The directory form is what makes the evidence directory
+    excluded whole: a list of the files it held when a command started cannot
+    cover a file a gate writes there while it runs.
+    """
+    return path in exclude or any(path.startswith(entry) for entry in exclude if entry.endswith("/"))
 
 
 def state_id(repo: Path, exclude: frozenset[str] = frozenset()) -> str:
@@ -215,7 +239,7 @@ def state_id(repo: Path, exclude: frozenset[str] = frozenset()) -> str:
     digest = hashlib.sha256()
     digest.update(head_sha(repo).encode())
     for status, path in _status_entries(git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")):
-        if path in exclude:
+        if _excluded(path, exclude):
             continue
         digest.update(status.encode())
         digest.update(path.encode())
@@ -267,12 +291,12 @@ def state_paths(repo: Path, exclude: frozenset[str] = frozenset()) -> set[tuple[
     reported, just without the path list.
     """
     entries = _status_entries(git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all"))
-    return {(status, path) for status, path in entries if path not in exclude}
+    return {(status, path) for status, path in entries if not _excluded(path, exclude)}
 
 
 def is_dirty(repo: Path, exclude: frozenset[str] = frozenset()) -> bool:
     entries = _status_entries(git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all"))
-    return any(path not in exclude for _, path in entries)
+    return any(not _excluded(path, exclude) for _, path in entries)
 
 
 def blocked(message: str) -> "SystemExit":
@@ -1946,8 +1970,18 @@ def command_compose_v3(args) -> int:
 
     baseline_path = baseline_path_for(paths[0])
     if not baseline_path.exists():
-        raise blocked("GOVERNING BASELINE MISSING: run `verify.py baseline` before the task and keep "
-                      ".verification/shadow/baseline.v3.json with the evidence")
+        # Named exactly. The baseline is read beside the FIRST record, so a first
+        # record kept anywhere else reported the baseline missing while it sat
+        # beside the others - sending the reader to recreate something present.
+        elsewhere = sorted({str(baseline_path_for(path)) for path in paths[1:]
+                            if baseline_path_for(path).exists()})
+        raise blocked(
+            f"GOVERNING BASELINE MISSING: no baseline at {baseline_path}, which is where compose "
+            f"reads it: beside the first record given ({paths[0]}). Run `verify.py baseline` before "
+            f"the task and keep it with the evidence."
+            + (f" One exists beside another record given ({', '.join(elsewhere)}); pass a record "
+               f"from that directory first." if elsewhere else "")
+        )
     baseline = load_baseline(baseline_path)
     applies, why = baseline_applies(repo, baseline)
     if not applies:
@@ -2270,10 +2304,22 @@ def command_compare(args) -> int:
 
 
 def load_json(path: Path) -> dict:
+    """A JSON object from disk, or BLOCKED naming the file.
+
+    Every record, payload and baseline this verifier reads is an object, and
+    every caller reads it with `.get`. Valid JSON of another type - `[1]`,
+    `"evidence"`, `5` - parsed, reached that `.get`, and ended in an
+    AttributeError traceback where a refusal belonged. Checked once, here,
+    rather than at each of the call sites that assumed it.
+    """
     try:
-        return json.loads(path.read_text())
+        value = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as error:
         raise blocked(f"{path}: unreadable ({type(error).__name__})") from None
+    if not isinstance(value, dict):
+        raise blocked(f"{path}: holds a JSON {type(value).__name__}, not an object; "
+                      f"no verification record or payload has that shape")
+    return value
 
 
 def load_record(path: Path) -> dict:
@@ -2454,10 +2500,11 @@ def relative_inside(repo: Path, paths) -> frozenset[str]:
     correctness depend on onboarding being remembered.
     """
     named = {p.relative_to(repo).as_posix() for p in paths if p is not None and p.is_relative_to(repo)}
-    evidence = repo / EVIDENCE_DIR
-    if evidence.is_dir():
-        named |= {f.relative_to(repo).as_posix() for f in evidence.rglob("*") if f.is_file()}
-    return frozenset(named)
+    # By prefix, not by listing what is there now. The listing was taken before
+    # the gates ran, so an artifact a gate wrote into the evidence directory -
+    # where evidence/3 tells behavioural gates to put them - was not in it, and
+    # read as the gate moving the repository. Only a `.gitignore` entry hid that.
+    return frozenset(named | {f"{EVIDENCE_DIR}/"})
 
 
 def new_record(repo: Path, authority: str, gates: list[dict], exclude: frozenset[str],
