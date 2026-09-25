@@ -118,3 +118,51 @@ def test_a_gate_writing_outside_the_evidence_directory_is_still_drift(tmp_path):
     code, output = cli(root, "run", "--output", str(root / ".verification" / "local.json"))
     assert code == 2, output
     assert "moved  generated.txt" in output
+
+
+# --------------------------------------------------------------------------
+# Symlinks are never followed, however deep in an untracked directory.
+# --------------------------------------------------------------------------
+
+def _state(root):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ladder_verify_boundaries", SCRIPT)
+    verify = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verify)
+    return verify.state_id(root)
+
+
+def test_a_symlink_inside_an_untracked_nested_repository_is_not_followed(tmp_path):
+    """Only the top level refused to follow links.
+
+    `git status` reports an untracked nested repository as one directory entry,
+    and hashing that directory followed the links inside it, so bytes outside the
+    repository decided its state id. A link's identity is where it points.
+    """
+    root = make_repo(tmp_path / "repo")
+    outside = tmp_path / "outside"
+    (outside / "dir").mkdir(parents=True)
+    (outside / "file.txt").write_text("one\n")
+    (outside / "dir" / "inner.txt").write_text("one\n")
+    nested = root / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    (nested / "real.txt").write_text("real\n")
+    (nested / "to-file").symlink_to(outside / "file.txt")
+    (nested / "to-dir").symlink_to(outside / "dir")
+    assert "?? nested/" in subprocess.run(["git", "status", "--porcelain"], cwd=root,
+                                          capture_output=True, text=True, check=True).stdout, \
+        "premise: git reports the nested repository as a single directory entry"
+
+    before = _state(root)
+    (outside / "file.txt").write_text("two\n")
+    (outside / "dir" / "inner.txt").write_text("two\n")
+    assert _state(root) == before, "bytes outside the repository moved its state id"
+
+    # Narrower is not blind: what the repository does hold still binds.
+    (nested / "to-file").unlink()
+    (nested / "to-file").symlink_to(outside / "dir")
+    retargeted = _state(root)
+    assert retargeted != before, "a link that points somewhere else is a different state"
+    (nested / "real.txt").write_text("changed\n")
+    assert _state(root) != retargeted, "a real file inside the nested repository still binds"

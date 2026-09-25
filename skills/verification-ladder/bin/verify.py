@@ -191,9 +191,22 @@ def _hash_path(digest: "hashlib._Hash", repo: Path, relative: str) -> None:
         # content that lives outside the state being identified.
         digest.update(b"symlink:" + os.readlink(target).encode())
     elif target.is_dir():
-        for child in sorted(p for p in target.rglob("*") if p.is_file()):
-            digest.update(child.relative_to(repo).as_posix().encode())
-            digest.update(hashlib.sha256(child.read_bytes()).digest())
+        # The same rule as the top level, applied inside. `git status` reports an
+        # untracked nested repository as one directory entry, and hashing it
+        # through `rglob` and `is_file` followed any symlink within it, so the
+        # contents of a file outside the repository became part of its state id.
+        # An explicit walk that never follows links, rather than `rglob`, whose
+        # symlink handling changed between the interpreters CI runs.
+        children = []
+        for root, dirs, files in os.walk(target, followlinks=False):
+            children += [Path(root) / name for name in (*dirs, *files)]
+        for child in sorted(children):
+            if child.is_symlink():
+                digest.update(child.relative_to(repo).as_posix().encode())
+                digest.update(b"symlink:" + os.readlink(child).encode())
+            elif child.is_file():
+                digest.update(child.relative_to(repo).as_posix().encode())
+                digest.update(hashlib.sha256(child.read_bytes()).digest())
     elif target.is_file():
         digest.update(hashlib.sha256(target.read_bytes()).digest())
     else:
