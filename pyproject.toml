@@ -1,6 +1,6 @@
 [project]
 name = "verification-ladder"
-version = "0.3.0"
+version = "0.3.1"
 description = "A portable verification procedure and evidence machinery for coding agents"
 readme = "README.md"
 requires-python = ">=3.11"
