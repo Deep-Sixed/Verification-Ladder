@@ -200,6 +200,17 @@ def _hash_path(digest: "hashlib._Hash", repo: Path, relative: str) -> None:
         digest.update(b"absent")
 
 
+def _excluded(path: str, exclude: frozenset[str]) -> bool:
+    """Whether a `git status` path is evidence rather than repository state.
+
+    An entry ending in "/" excludes everything beneath it; any other entry is
+    one exact path. The directory form is what makes the evidence directory
+    excluded whole: a list of the files it held when a command started cannot
+    cover a file a gate writes there while it runs.
+    """
+    return path in exclude or any(path.startswith(entry) for entry in exclude if entry.endswith("/"))
+
+
 def state_id(repo: Path, exclude: frozenset[str] = frozenset()) -> str:
     """Identify the exact state under verification: HEAD plus every deviation from it.
 
@@ -215,7 +226,7 @@ def state_id(repo: Path, exclude: frozenset[str] = frozenset()) -> str:
     digest = hashlib.sha256()
     digest.update(head_sha(repo).encode())
     for status, path in _status_entries(git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")):
-        if path in exclude:
+        if _excluded(path, exclude):
             continue
         digest.update(status.encode())
         digest.update(path.encode())
@@ -267,12 +278,12 @@ def state_paths(repo: Path, exclude: frozenset[str] = frozenset()) -> set[tuple[
     reported, just without the path list.
     """
     entries = _status_entries(git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all"))
-    return {(status, path) for status, path in entries if path not in exclude}
+    return {(status, path) for status, path in entries if not _excluded(path, exclude)}
 
 
 def is_dirty(repo: Path, exclude: frozenset[str] = frozenset()) -> bool:
     entries = _status_entries(git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all"))
-    return any(path not in exclude for _, path in entries)
+    return any(not _excluded(path, exclude) for _, path in entries)
 
 
 def blocked(message: str) -> "SystemExit":
@@ -2466,10 +2477,11 @@ def relative_inside(repo: Path, paths) -> frozenset[str]:
     correctness depend on onboarding being remembered.
     """
     named = {p.relative_to(repo).as_posix() for p in paths if p is not None and p.is_relative_to(repo)}
-    evidence = repo / EVIDENCE_DIR
-    if evidence.is_dir():
-        named |= {f.relative_to(repo).as_posix() for f in evidence.rglob("*") if f.is_file()}
-    return frozenset(named)
+    # By prefix, not by listing what is there now. The listing was taken before
+    # the gates ran, so an artifact a gate wrote into the evidence directory -
+    # where evidence/3 tells behavioural gates to put them - was not in it, and
+    # read as the gate moving the repository. Only a `.gitignore` entry hid that.
+    return frozenset(named | {f"{EVIDENCE_DIR}/"})
 
 
 def new_record(repo: Path, authority: str, gates: list[dict], exclude: frozenset[str],

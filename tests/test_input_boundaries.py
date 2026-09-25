@@ -83,3 +83,38 @@ def test_a_ci_payload_that_is_not_an_object_is_refused(repo, tmp_path, text, kin
     assert "Traceback" not in output, output
     assert code == 2, output
     assert f"{payloads[which].name}: holds a JSON {kind}, not an object" in output
+
+
+# --------------------------------------------------------------------------
+# The evidence directory is excluded whole, including what a gate writes there.
+# --------------------------------------------------------------------------
+
+WRITES_ARTIFACT = POLICY.replace(
+    'unit = "true"', '''unit = "sh -c 'mkdir -p .verification/artifacts && echo x > .verification/artifacts/new.json'"''')
+WRITES_SOURCE = POLICY.replace('unit = "true"', '''unit = "sh -c 'echo x > generated.txt'"''')
+
+
+def test_an_artifact_a_gate_writes_into_the_evidence_directory_is_not_drift(tmp_path):
+    """The exclusion was the files the directory held when `run` started.
+
+    A gate writing an artifact there - where evidence/3 tells behavioural gates to
+    put them - produced a file that list did not contain, and the run read it as
+    the gate moving the repository. Only a `.gitignore` entry hid it, and the
+    exclusion exists precisely so correctness does not depend on one.
+    """
+    root = make_repo(tmp_path / "repo", WRITES_ARTIFACT, gitignore=None)
+    (root / ".verification").mkdir()
+    (root / ".verification" / "seed.txt").write_text("present before the run\n")
+    code, output = cli(root, "run", "--output", str(root / ".verification" / "local.json"))
+    assert (root / ".verification" / "artifacts" / "new.json").exists(), "premise: the gate wrote it"
+    assert code == 0, output
+    assert "drift" not in output, output
+    assert json.loads((root / ".verification" / "local.json").read_text())["drift"] is False
+
+
+def test_a_gate_writing_outside_the_evidence_directory_is_still_drift(tmp_path):
+    """The other side: excluding by prefix must not stop drift being seen at all."""
+    root = make_repo(tmp_path / "repo", WRITES_SOURCE, gitignore=None)
+    code, output = cli(root, "run", "--output", str(root / ".verification" / "local.json"))
+    assert code == 2, output
+    assert "moved  generated.txt" in output
