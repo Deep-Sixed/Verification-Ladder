@@ -8,7 +8,7 @@
 # repository with no verification policy.
 set -u
 
-PIN=c86bf47e70d7a3aa18c968011b487190e2becbea
+PIN=819b7c27cce400a40e3be75c8978351e1d7c82d4
 INV_SHA=282f21173aad9815a22a6ece35ad0fdd42653dd7a001dc6d85e6d51189aa5699
 CLONE=$HOME/src/verification-ladder
 LINK=$HOME/.claude/skills/verification-ladder

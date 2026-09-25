@@ -36,7 +36,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 INSTALLER = REPO / "scripts" / "install-ladder.sh"
 CHECKER = REPO / "scripts" / "check-install.sh"
-PIN = "c86bf47e70d7a3aa18c968011b487190e2becbea"
+PIN = "819b7c27cce400a40e3be75c8978351e1d7c82d4"
 ORIGIN = "https://github.com/Deep-Sixed/Verification-Ladder"
 
 
@@ -520,12 +520,17 @@ def test_the_pin_installs_the_hardened_release():
     therefore got none of that hardening, under the same contract identity as a
     build that had it. Hardcoded rather than compared with the working tree,
     because a future contract bump lands one PR before the pin can follow it.
+
+    It then pinned c86bf47, 0.3.0, which predates the input and state-boundary
+    fixes that 0.3.1 releases (#9): a scripted install kept the crash on
+    non-object JSON and the evidence-directory drift.
     """
-    assert PIN != "760977f69d6b74b9888be4c9cbb404f7726bea73"
+    assert PIN not in ("760977f69d6b74b9888be4c9cbb404f7726bea73", "c86bf47e70d7a3aa18c968011b487190e2becbea")
     runtime = _git("show", f"{PIN}:skills/verification-ladder/bin/verify.py", cwd=REPO).stdout
     assert 'COMPATIBILITY = "evidence-v3.2"' in runtime
-    assert 'VERSION = "0.3.0"' in runtime
+    assert 'VERSION = "0.3.1"' in runtime
     assert 'EVIDENCE_CONTRACT = "evidence"' in runtime, "the pinned runtime cannot read the adoption line"
+    assert "def _excluded(" in runtime, "the pinned runtime predates the evidence-directory prefix exclusion"
     for script in (INSTALLER, CHECKER):
         assert f"PIN={PIN}" in script.read_text(), f"{script.name} pins a different runtime"
 

@@ -10,7 +10,7 @@
 # to the checker it was reviewed with, for the same reason.
 set -u
 
-PIN=c86bf47e70d7a3aa18c968011b487190e2becbea
+PIN=819b7c27cce400a40e3be75c8978351e1d7c82d4
 REPO=https://github.com/Deep-Sixed/Verification-Ladder
 # sha256 of the invariant block in INSTALL.md at $PIN. Moving the pin without
 # revalidating this makes the installer fail closed rather than paste unknown
@@ -30,7 +30,7 @@ BOOTSTRAP_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/verification-ladder
 # afterwards. Changing check-install.sh means changing this constant in the same
 # commit; a mismatch is refused rather than reported, because the checker is the
 # only thing that would have caught it.
-CHECKER_SHA=d7b922510547b8f9d856a897bd493a4a5db3785f2d2fd15fc259e542dcf6ce07
+CHECKER_SHA=3a460e1c996131f4ef4dca313d34e536a4c37ad3add11839ca632e6b3220219f
 SELF=$(readlink -f "$0" 2>/dev/null || echo "$0")
 SELF_DIR=$(dirname "$SELF")
 DO_CODEX=0; DRY=0; FORCE=0
