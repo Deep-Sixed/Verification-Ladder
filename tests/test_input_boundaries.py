@@ -166,3 +166,44 @@ def test_a_symlink_inside_an_untracked_nested_repository_is_not_followed(tmp_pat
     assert retargeted != before, "a link that points somewhere else is a different state"
     (nested / "real.txt").write_text("changed\n")
     assert _state(root) != retargeted, "a real file inside the nested repository still binds"
+
+
+# --------------------------------------------------------------------------
+# A missing baseline is reported where compose actually looked.
+# --------------------------------------------------------------------------
+
+def _activated(root):
+    """An evidence/3 repository: adopted in the policy, activated in the checkout."""
+    (root / "verification.toml").write_text('evidence = "verification.ladder.evidence/3"\n' + POLICY)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false",
+                    "commit", "-qam", "adopt"], cwd=root, check=True)
+    (root / ".verification").mkdir(exist_ok=True)
+    (root / ".verification" / "authority.json").write_text(json.dumps(
+        {"schema": "verification.ladder.authority/1", "authority": "verification.ladder.evidence/3"}))
+    assert cli(root, "baseline")[0] == 0
+    record = root / ".verification" / "local.json"
+    code, output = cli(root, "run", "--output", str(record))
+    assert code == 0 and json.loads(record.read_text())["schema"] == "verification.ladder.evidence/3", output
+    return record
+
+
+def test_compose_names_the_baseline_it_looked_for(repo, tmp_path):
+    """Read beside the FIRST record, and said to be missing without saying where.
+
+    With the first record kept outside the evidence directory, the report sent
+    the reader to recreate a baseline that sat beside the other records.
+    """
+    record = _activated(repo)
+    elsewhere = tmp_path / "copies"
+    elsewhere.mkdir()
+    (elsewhere / "local.json").write_text(record.read_text())
+
+    code, output = cli(repo, "compose", str(elsewhere / "local.json"), str(record))
+    assert code == 2, output
+    assert f"no baseline at {elsewhere / 'shadow' / 'baseline.v3.json'}" in output, output
+    assert f"One exists beside another record given ({repo / '.verification' / 'shadow' / 'baseline.v3.json'})" in output
+
+    code, output = cli(repo, "compose", str(elsewhere / "local.json"))
+    assert code == 2, output
+    assert f"no baseline at {elsewhere / 'shadow' / 'baseline.v3.json'}" in output
+    assert "One exists beside" not in output, "nothing to point at when no given record has one"

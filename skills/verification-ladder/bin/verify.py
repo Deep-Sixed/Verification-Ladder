@@ -1970,8 +1970,18 @@ def command_compose_v3(args) -> int:
 
     baseline_path = baseline_path_for(paths[0])
     if not baseline_path.exists():
-        raise blocked("GOVERNING BASELINE MISSING: run `verify.py baseline` before the task and keep "
-                      ".verification/shadow/baseline.v3.json with the evidence")
+        # Named exactly. The baseline is read beside the FIRST record, so a first
+        # record kept anywhere else reported the baseline missing while it sat
+        # beside the others - sending the reader to recreate something present.
+        elsewhere = sorted({str(baseline_path_for(path)) for path in paths[1:]
+                            if baseline_path_for(path).exists()})
+        raise blocked(
+            f"GOVERNING BASELINE MISSING: no baseline at {baseline_path}, which is where compose "
+            f"reads it: beside the first record given ({paths[0]}). Run `verify.py baseline` before "
+            f"the task and keep it with the evidence."
+            + (f" One exists beside another record given ({', '.join(elsewhere)}); pass a record "
+               f"from that directory first." if elsewhere else "")
+        )
     baseline = load_baseline(baseline_path)
     applies, why = baseline_applies(repo, baseline)
     if not applies:
