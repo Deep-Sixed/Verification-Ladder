@@ -67,7 +67,7 @@ EVIDENCE_CONTRACT = "evidence"
 # and fails closed. evidence-v3.1 was the same record shape under weaker rules,
 # so its records must not compose with these. CHANGELOG.md says what moved.
 COMPATIBILITY = "evidence-v3.2"
-VERSION = "0.3.0"  # tracks pyproject's version; tests/test_schema_v3.py holds them equal
+VERSION = "0.3.1"  # tracks pyproject's version; tests/test_schema_v3.py holds them equal
 # A gate declares the target dimensions it depends on. Evidence must carry every
 # dimension its gate declares, and dimensions it does not declare are never
 # compared - so a moved runtime expires a behavioural gate while a lint gate,
