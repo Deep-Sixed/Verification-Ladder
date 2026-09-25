@@ -2270,10 +2270,22 @@ def command_compare(args) -> int:
 
 
 def load_json(path: Path) -> dict:
+    """A JSON object from disk, or BLOCKED naming the file.
+
+    Every record, payload and baseline this verifier reads is an object, and
+    every caller reads it with `.get`. Valid JSON of another type - `[1]`,
+    `"evidence"`, `5` - parsed, reached that `.get`, and ended in an
+    AttributeError traceback where a refusal belonged. Checked once, here,
+    rather than at each of the call sites that assumed it.
+    """
     try:
-        return json.loads(path.read_text())
+        value = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as error:
         raise blocked(f"{path}: unreadable ({type(error).__name__})") from None
+    if not isinstance(value, dict):
+        raise blocked(f"{path}: holds a JSON {type(value).__name__}, not an object; "
+                      f"no verification record or payload has that shape")
+    return value
 
 
 def load_record(path: Path) -> dict:
