@@ -29,8 +29,10 @@ un-ignored `.verification/` or symlinks inside an untracked nested directory. A
 record written by 0.3.0 over such a tree goes stale here; it fails safe and is
 re-established by running again.
 
-Installation still pins the 0.3.0 runtime. The installer refuses a pin that is
-not already on `main`, so moving it to this release is a separate change.
+Installation (#11): `scripts/install-ladder.sh` and `scripts/check-install.sh`
+move their pin from `c86bf47`, the 0.3.0 runtime, to `819b7c2`, the commit that
+released 0.3.1 (#10). It had to be a separate change because the installer
+refuses a pin that is not already on `main`.
 
 ## 0.3.0 — contract `evidence-v3.2`
 
