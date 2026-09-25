@@ -101,13 +101,21 @@ The evidence model is being revised. [`docs/design/evidence-v3.md`](docs/design/
 its definition, permitted authority, execution provenance, target state, proof
 artifacts and verifier identity all refer to the same thing.
 
-**The model is implemented and activatable.** Before activation, records on disk
-are `evidence/2`; beside each one the CLI writes an evidence/3 shadow, and
-`compare` and `qualify` report how the v3 reading differs without changing the
-v2 verdict. After `verify.py activate` writes `.verification/authority.json`,
+**The model is implemented and activatable.** A project adopts it with
+`evidence = "verification.ladder.evidence/3"` in its committed policy. Until a
+checkout activates, records on disk are `evidence/2`; beside each one the CLI
+writes an evidence/3 shadow, and `compare` and `qualify` report how the v3
+reading differs, while `compose` refuses to report completion under the older
+contract. After `verify.py activate` writes `.verification/authority.json`,
 new `run`, `attest`, and `import-ci` records are `evidence/3`, and `compose`
 applies the v3 admissibility rules as the authoritative predicate. Existing
 `evidence/2` records remain readable for migration diagnostics, but cannot
 satisfy activated v3 requirements.
+
+**It has qualified against a real consumer.** Cerberus adopted evidence/3 on
+0.3.0 and reached `READY FOR HUMAN GATE TRUE` from its own local gate, a real
+GitHub Actions run and attested judgment. Six targeted mutations were each
+refused for the reason that names them. The record is in
+[`docs/qualification/cerberus-0.3.0.md`](docs/qualification/cerberus-0.3.0.md).
 
 MIT licensed; see `LICENSE`.
