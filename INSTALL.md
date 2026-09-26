@@ -38,7 +38,7 @@ one composite to share it. A clone that moves under the agent changes the rules
 mid-task: records taken before a `git pull` and after it can stop composing, for
 a reason that has nothing to do with the code under verification.
 
-**There are no release tags yet**, so pin the commit you intend to run:
+**Pin a full commit id**, not a tag or a branch:
 
 ```sh
 git -C ~/src/verification-ladder fetch origin
@@ -46,9 +46,22 @@ git -C ~/src/verification-ladder checkout --detach <commit>
 git -C ~/src/verification-ladder rev-parse HEAD    # record this; evidence will name it
 ```
 
-When releases are cut, a tag becomes the thing to pin and this reads
-`checkout v<version>` instead. Until then a branch name is not a pin, and
-`main` is not a stable one — it is simply a branch that has moved less.
+Releases are tagged, and each release names two commits, because the installer
+can only pin a commit that is already on `main`:
+
+| Release | Tag names | Runtime the installer pins |
+|---|---|---|
+| 0.3.1 | `v0.3.1` → `84418d8069cee3cc9317bdcc05d1ffc34e02bfb0` | `819b7c27cce400a40e3be75c8978351e1d7c82d4` |
+
+The tag marks the commit whose `scripts/` install the release. The runtime pin
+is the commit whose `skills/` they install, and it is the one to check out
+above. Both report version 0.3.1 under contract `evidence-v3.2`.
+
+Use the full commit id even though tags exist. A tag in this repository can
+still be moved or deleted, so it is a name for a commit rather than a pin, and
+a commit id is what evidence records name. That changes only when release tags
+are protected against being moved; until then a tag, like a branch, is a
+moving part, and `main` is simply a branch that has moved less.
 
 Upgrading stays deliberate: fetch, read what changed, check out the new commit,
 and re-verify anything in flight if evidence semantics moved.
