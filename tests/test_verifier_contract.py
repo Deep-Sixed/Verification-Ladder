@@ -12,6 +12,8 @@ import subprocess
 from pathlib import Path
 from pathlib import Path as _P
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parents[1] / "skills" / "verification-ladder" / "bin" / "verify.py"
 _spec = importlib.util.spec_from_file_location("ladder_verify_contract", SCRIPT)
 verify = importlib.util.module_from_spec(_spec)
@@ -117,3 +119,31 @@ def test_install_never_names_a_ref_this_repository_does_not_have():
     tags = set(subprocess.run(["git", "tag", "-l"], cwd=root, capture_output=True, text=True,
                               check=True).stdout.split())
     assert named <= tags, f"INSTALL.md names {sorted(named - tags)}, which this repository has no tag for"
+
+
+def test_install_names_each_release_by_the_commits_it_really_is():
+    """The release table is provenance, so it has to match the repository.
+
+    It said "there are no release tags yet" for two releases after the first tag.
+    Each row now names a tag, the commit it resolves to, and the runtime the
+    installer at that tag pins; all three are checked, not trusted.
+    """
+    root = _P(__file__).resolve().parents[1]
+    install = (root / "INSTALL.md").read_text()
+    assert "no release tags" not in install
+    rows = re.findall(r"^\| ([0-9][^ |]*) \| `(v[^`]+)` → `([0-9a-f]{40})` \| `([0-9a-f]{40})` \|$",
+                      install, re.MULTILINE)
+    assert rows, "INSTALL.md has no release table"
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=False)
+
+    for version, tag, tagged, runtime in rows:
+        resolved = git("rev-parse", "--verify", "--quiet", f"{tag}^{{commit}}")
+        if resolved.returncode != 0:
+            pytest.skip(f"this checkout does not have {tag}")
+        assert resolved.stdout.strip() == tagged, f"{tag} resolves to {resolved.stdout.strip()}, not {tagged}"
+        installer = git("show", f"{tagged}:scripts/install-ladder.sh").stdout
+        assert f"PIN={runtime}\n" in installer, f"the installer at {tag} does not pin {runtime}"
+        pinned = git("show", f"{runtime}:skills/verification-ladder/bin/verify.py").stdout
+        assert f'VERSION = "{version}"' in pinned, f"the runtime {runtime} is not {version}"

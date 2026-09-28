@@ -166,6 +166,11 @@ def _status_entries(raw: bytes):
 
     Rename and copy entries carry a second NUL-terminated field holding the
     original path; both sides are reported so a rename changes the state id.
+
+    Paths are decoded with `os.fsdecode`, not as UTF-8: a filename is whatever
+    bytes the filesystem holds, and `-z` output is never quoted. An invalid
+    byte becomes a surrogate escape that `os.fsencode` turns back into the same
+    byte, so no path is lost and a valid UTF-8 path decodes exactly as before.
     """
     fields = raw.split(b"\0")
     index = 0
@@ -175,21 +180,37 @@ def _status_entries(raw: bytes):
         if not field:
             continue
         status, _, path = field[:2], field[2:3], field[3:]
-        yield status.decode(), path.decode()
+        yield status.decode(), os.fsdecode(path)
         if (status[:1] in (b"R", b"C") or status[1:2] in (b"R", b"C")) and index < len(fields):
             origin = fields[index]
             index += 1
             if origin:
-                yield status.decode() + "<-", origin.decode()
+                yield status.decode() + "<-", os.fsdecode(origin)
 
 
 def _hash_path(digest: "hashlib._Hash", repo: Path, relative: str) -> None:
-    """Fold one worktree path's content into `digest`, directories included."""
+    """Fold one worktree path's content into `digest`, directories included.
+
+    A path that cannot be read leaves the state unidentified, so it is BLOCKED
+    naming the path - never a traceback, whose exit code would read as FAIL.
+    """
+    try:
+        _fold_path(digest, repo, relative)
+    except OSError as error:
+        raise blocked(f"{relative}: cannot be read ({type(error).__name__}: {error.strerror or error}); "
+                      f"the state under verification cannot be identified") from None
+
+
+def _raise(error: OSError) -> None:
+    raise error
+
+
+def _fold_path(digest: "hashlib._Hash", repo: Path, relative: str) -> None:
     target = repo / relative
     if target.is_symlink():
         # A symlink's identity is where it points; following it would fold in
         # content that lives outside the state being identified.
-        digest.update(b"symlink:" + os.readlink(target).encode())
+        digest.update(b"symlink:" + os.fsencode(os.readlink(target)))
     elif target.is_dir():
         # The same rule as the top level, applied inside. `git status` reports an
         # untracked nested repository as one directory entry, and hashing it
@@ -198,14 +219,16 @@ def _hash_path(digest: "hashlib._Hash", repo: Path, relative: str) -> None:
         # An explicit walk that never follows links, rather than `rglob`, whose
         # symlink handling changed between the interpreters CI runs.
         children = []
-        for root, dirs, files in os.walk(target, followlinks=False):
+        # `onerror` because os.walk otherwise skips a directory it cannot list,
+        # and a state id that silently omits part of the tree identifies nothing.
+        for root, dirs, files in os.walk(target, followlinks=False, onerror=_raise):
             children += [Path(root) / name for name in (*dirs, *files)]
         for child in sorted(children):
             if child.is_symlink():
-                digest.update(child.relative_to(repo).as_posix().encode())
-                digest.update(b"symlink:" + os.readlink(child).encode())
+                digest.update(os.fsencode(child.relative_to(repo).as_posix()))
+                digest.update(b"symlink:" + os.fsencode(os.readlink(child)))
             elif child.is_file():
-                digest.update(child.relative_to(repo).as_posix().encode())
+                digest.update(os.fsencode(child.relative_to(repo).as_posix()))
                 digest.update(hashlib.sha256(child.read_bytes()).digest())
     elif target.is_file():
         digest.update(hashlib.sha256(target.read_bytes()).digest())
@@ -242,7 +265,7 @@ def state_id(repo: Path, exclude: frozenset[str] = frozenset()) -> str:
         if _excluded(path, exclude):
             continue
         digest.update(status.encode())
-        digest.update(path.encode())
+        digest.update(os.fsencode(path))
         _hash_path(digest, repo, path)
     return "sha256:" + digest.hexdigest()
 
